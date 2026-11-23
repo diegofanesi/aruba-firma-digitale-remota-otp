@@ -26,16 +26,18 @@ fi
 
 build_one() {
   local dir=$1 pkg
+  shift
   (cd "$dir" && makepkg "${flags[@]}")
   pkg=$(ls -t "$dir"/*.pkg.tar.zst | head -1)
   cp "$pkg" "$out/"
   if (( install )); then
-    sudo pacman -U --needed --noconfirm "$pkg"
+    sudo pacman -U --needed --noconfirm "$@" "$pkg"
   fi
 }
 
+# The libraries are installed as dependencies: `pacman -Rs aruba-firma` removes them too.
 for dep in python-uritools python-signxml python-xsdata python-pyhanko-certvalidator python-pyhanko; do
-  build_one "$here/deps/$dep"
+  build_one "$here/deps/$dep" --asdeps
 done
 
 version=$(python3 -c "import tomllib; print(tomllib.load(open('$root/pyproject.toml', 'rb'))['project']['version'])")
@@ -48,4 +50,5 @@ echo
 echo "Pacchetti pronti in $out:"
 ls -1 "$out"
 echo
-echo "Su un altro computer Arch:  sudo pacman -U $(basename "$out")/*.pkg.tar.zst"
+echo "Su un altro computer Arch:"
+echo "  sudo pacman -U --asdeps $(basename "$out")/python-*.pkg.tar.zst && sudo pacman -U $(basename "$out")/aruba-firma-*.pkg.tar.zst"

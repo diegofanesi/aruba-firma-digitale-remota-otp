@@ -20,7 +20,8 @@ con pacman; le dipendenze sono pacchetti ufficiali più cinque librerie Python i
 `dist/arch/`:
 
 ```bash
-sudo pacman -U dist/arch/*.pkg.tar.zst
+sudo pacman -U --asdeps dist/arch/python-*.pkg.tar.zst   # le librerie, come dipendenze
+sudo pacman -U dist/arch/aruba-firma-*.pkg.tar.zst       # il programma
 ```
 
 Si ottengono i comandi `aruba-firma` e `aruba-firma-gui` e la voce **Aruba Firma Digitale**
