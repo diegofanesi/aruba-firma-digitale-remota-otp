@@ -14,12 +14,16 @@ SERVICE = "firma-remota"  # Secret Service "service" / KWallet folder
 OPEN_TIMEOUT = 120  # seconds: opening the wallet may show an unlock or "allow access" prompt
 
 
-PASSWORD_KEY = "account"  # fixed and anonymous: the entry's name doesn't reveal the username
+# Fixed, anonymous entry names: the username is stored as a secret *value*, never in a name or
+# attribute (Secret Service attributes are not always encrypted). Nothing else is kept anywhere.
+PASSWORD_KEY = "password"
+LOGIN_KEY = "utente"  # value: "username@domain"
 
 
-def legacy_key(user: str, domain: str) -> str:
-    """Entry name used by older versions ("utente@dominio")."""
-    return f"{user}@{domain}"
+def split_login(login: str) -> tuple[str, str]:
+    """'mario.rossi@firma' -> ('mario.rossi', 'firma'); the domain defaults to 'firma'."""
+    user, _, domain = login.strip().partition("@")
+    return user.strip(), domain.strip() or "firma"
 
 
 class CredentialStoreError(Exception):
@@ -174,6 +178,31 @@ def stored_password() -> str | None:
     """The Aruba password saved in the wallet, or None (no wallet, or nothing saved)."""
     store = get_store()
     return store.get(PASSWORD_KEY) if store else None
+
+
+def stored_login() -> tuple[str, str] | None:
+    """(username, domain) saved in the wallet, or None."""
+    from .logsetup import register_personal
+
+    store = get_store()
+    login = store.get(LOGIN_KEY) if store else None
+    if not login:
+        return None
+    user, domain = split_login(login)
+    register_personal(login, user)
+    return user, domain
+
+
+def save_account(store: Store, user: str, domain: str, password: str) -> None:
+    store.set(LOGIN_KEY, f"{user}@{domain}")
+    store.set(PASSWORD_KEY, password)
+    if store.get(PASSWORD_KEY) != password or store.get(LOGIN_KEY) != f"{user}@{domain}":
+        raise CredentialStoreError("Il portachiavi non ha restituito i dati appena salvati.")
+
+
+def forget_account(store: Store) -> None:
+    store.delete(PASSWORD_KEY)
+    store.delete(LOGIN_KEY)
 
 
 def get_store() -> Store | None:

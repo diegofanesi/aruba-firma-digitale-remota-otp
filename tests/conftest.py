@@ -18,9 +18,22 @@ from cryptography.x509.oid import NameOID, ObjectIdentifier
 from pypdf import PdfWriter
 from pypdf.generic import RectangleObject
 
-from firmaremota import logsetup, vault
+from firmaremota import credentials, logsetup
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def pytest_configure(config):
+    """Sandbox the whole run: HOME and the XDG folders point to a temporary directory and are never
+    restored during the session, so nothing (not even a stray background thread finishing after its
+    test) can write to the real home. Per-test folders are set on top of this by `isolated_dirs`."""
+    import tempfile
+
+    sandbox = Path(tempfile.mkdtemp(prefix="firma-remota-test-"))
+    os.environ["FIRMA_REAL_HOME"] = os.environ.get("HOME", "")
+    os.environ["HOME"] = str(sandbox)
+    for name in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+        os.environ[name] = str(sandbox / name.lower())
 # QCStatements with a single QcCompliance (0.4.0.1862.1.1) statement: marks a qualified certificate.
 QC_STATEMENTS = bytes.fromhex("300a3008060604008e460101")
 
@@ -32,7 +45,19 @@ def isolated_dirs(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setattr(logsetup, "_replacements", {})
-    monkeypatch.setattr(vault, "SCRYPT_N", 2**10)  # fast key derivation in tests (production: 2**15)
+
+
+@pytest.fixture(autouse=True)
+def no_real_wallet(monkeypatch):
+    """Tests never touch the real KWallet / GNOME Keyring: no store unless a test provides one."""
+    import keyring
+    from keyring.backends import fail
+
+    previous = keyring.get_keyring()
+    keyring.set_keyring(fail.Keyring())
+    monkeypatch.setattr(credentials.KWalletStore, "available", lambda self: False)
+    yield
+    keyring.set_keyring(previous)
 
 
 def _name(cn: str, *extra: x509.NameAttribute) -> x509.Name:
@@ -162,8 +187,7 @@ def sign_pdf(pki):
 
 
 PASSWORD = "pw-salvata"
-PROFILE = vault.Profile("mario.rossi", "firma", "NEW_2025:abc-AS0", "Mario Rossi",
-                        (dt.date.today() + dt.timedelta(days=400)).isoformat())
+LOGIN = ("mario.rossi", "firma")
 
 
 class MemoryStore:
@@ -186,10 +210,7 @@ class MemoryStore:
 
 @pytest.fixture
 def configured(monkeypatch):
-    """An encrypted profile for Mario Rossi, with its password saved in a fake wallet."""
-    from firmaremota import credentials
-
-    vault.save(PROFILE, PASSWORD)
-    store = MemoryStore({credentials.PASSWORD_KEY: PASSWORD})
+    """Mario Rossi's username and password in a fake wallet (the only place they are kept)."""
+    store = MemoryStore({credentials.PASSWORD_KEY: PASSWORD, credentials.LOGIN_KEY: "mario.rossi@firma"})
     monkeypatch.setattr(credentials, "get_store", lambda: store)
     return store

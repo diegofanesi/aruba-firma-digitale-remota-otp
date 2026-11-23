@@ -67,7 +67,8 @@ from firmaremota.arss.client import MSG_OTP  # noqa: E402
 from firmaremota.errors import OtpError, ServiceError  # noqa: E402
 
 from .conftest import PASSWORD  # noqa: E402
-from .fakes import FakeArss  # noqa: E402
+from firmaremota.errors import CredentialsError  # noqa: E402
+from .fakes import FakeArss, signer_info  # noqa: E402
 from .test_verify import RootsTrust  # noqa: E402
 
 A4 = (595, 842, 0, None)
@@ -99,7 +100,8 @@ def test_pdf_batch_one_otp(api, tmp_path, make_pdf, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Firmo 2 file con un solo codice OTP" in out and out.count("Firmato:") == 2
     assert (tmp_path / "a_firmato.pdf").exists() and (tmp_path / "b_firmato.pdf").exists()
-    assert api.calls[0] == ("open_session", "12345678")
+    assert api.names()[:2] == ["list_certs", "open_session"]  # account checked before the OTP is used
+    assert api.calls[1] == ("open_session", "12345678")
     assert api.names().count("open_session") == 1
 
 
@@ -115,24 +117,37 @@ def test_stamp_text_and_page(api, tmp_path, make_pdf, monkeypatch):
     answers(monkeypatch, "12345678")
     assert cli.main(["pdf", "--timbro", "--pagina", "1", "--posizione", "alto-sinistra", "--testo", "Visto",
                      str(tmp_path / "a.pdf")]) == 0
-    _, _, _, stamp, text = api.calls[1]
+    _, _, _, stamp, text = next(c for c in api.calls if c[0] == "sign_pdf")
     assert stamp.page == 1 and stamp.llx == 36 and stamp.ury == 806
     assert text == "Firmato digitalmente da Mario Rossi\nVisto"
 
 
-def test_typed_password_is_checked_locally(api, configured, tmp_path, make_pdf, monkeypatch, capsys):
-    """No saved password: a wrong one is caught by the encrypted profile, Aruba is never contacted."""
+def test_nothing_saved_everything_typed(api, configured, tmp_path, make_pdf, monkeypatch):
     configured.data.clear()
     (tmp_path / "a.pdf").write_bytes(make_pdf(A4))
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "sbagliata")
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": PASSWORD)
+    asked = answers(monkeypatch, "mario.rossi@firma", "12345678")
+    assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 0
+    assert asked[0].startswith("Nome utente Aruba") and api.calls[0] == ("list_certs", PASSWORD)
+    assert configured.data == {}  # typed credentials are never stored
+
+
+def test_wrong_password_stops_before_the_otp(api, tmp_path, make_pdf, monkeypatch, capsys):
+    api.certs = CredentialsError("Nome utente, dominio o password non accettati.")
+    (tmp_path / "a.pdf").write_bytes(make_pdf(A4))
     asked = answers(monkeypatch)
     assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 3
-    assert "La password non apre il profilo" in capsys.readouterr().err
-    assert api.calls == [] and asked == [] and config.load_state().auth_failures == 0
-    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": PASSWORD)
+    assert asked == [] and api.names() == ["list_certs"]  # no OTP asked, none spent
+    assert config.load_state().auth_failures == 1
+
+
+def test_expiring_certificate_warning(api, tmp_path, make_pdf, monkeypatch, capsys):
+    api.certs = [("NEW_2025:abc-AS0", signer_info("Mario Rossi", days_left=20))]
+    (tmp_path / "a.pdf").write_bytes(make_pdf(A4))
     answers(monkeypatch, "12345678")
     assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 0
+    assert "certificato di firma scade il" in capsys.readouterr().err
 
 
 def test_local_problems_ask_for_nothing(api, tmp_path, make_pdf, monkeypatch, capsys):
@@ -149,7 +164,7 @@ def test_badly_typed_otp_never_reaches_aruba(api, tmp_path, make_pdf, monkeypatc
     (tmp_path / "a.pdf").write_bytes(make_pdf(A4))
     answers(monkeypatch, "abc", "12", "")
     assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 3
-    assert api.calls == []
+    assert "open_session" not in api.names()
 
 
 def test_refused_otp(api, tmp_path, make_pdf, monkeypatch, capsys):

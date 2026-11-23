@@ -9,7 +9,6 @@ dependencies = [
     "asn1crypto>=1.5",
     "pypdf>=5",
     "pyhanko[etsi,requests]>=0.38",
-    "cryptography>=42",
 ]
 
 [project.scripts]

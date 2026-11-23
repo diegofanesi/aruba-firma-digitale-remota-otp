@@ -21,7 +21,7 @@ class FakeArss:
         self.make_p7m = make_p7m
         self.open_error = open_error
         self.fail_at = fail_at or {}
-        self.certs = certs or []
+        self.certs = CERTS if certs is None else certs
         self.calls: list[tuple] = []
         self._signs = 0
 
@@ -63,11 +63,15 @@ class FakeArss:
         return [c[0] for c in self.calls]
 
 
-def signer_info(name="Mario Rossi") -> SignerInfo:
+def signer_info(name="Mario Rossi", days_left=365) -> SignerInfo:
     import datetime as dt
 
     now = dt.datetime.now(dt.timezone.utc)
-    return SignerInfo(name, None, "1", "CA di prova", None, now, now, True)
+    return SignerInfo(name, None, "1", "CA di prova", None, now - dt.timedelta(days=30),
+                      now + dt.timedelta(days=days_left), True)
+
+
+CERTS = [("NEW_2025:abc-AS0", signer_info())]
 
 
 def soap(operation: str, inner: str) -> bytes:

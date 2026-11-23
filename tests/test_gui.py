@@ -12,19 +12,19 @@ from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import QDropEvent  # noqa: E402
 from PySide6.QtWidgets import QDialog  # noqa: E402
 
-from firmaremota import config, credentials, vault, verify  # noqa: E402
+from firmaremota import config, credentials, verify  # noqa: E402
 from firmaremota.arss.client import MSG_OTP  # noqa: E402
 from firmaremota.errors import CredentialsError, OtpError, ServiceError  # noqa: E402
 from firmaremota.gui.dialogs import OtpDialog, SetupDialog  # noqa: E402
 from firmaremota.gui.main_window import MainWindow  # noqa: E402
 from firmaremota.models import Kind, Position  # noqa: E402
 
-from .conftest import PASSWORD, PROFILE  # noqa: E402
+from .conftest import PASSWORD  # noqa: E402
 from .fakes import FakeArss, signer_info  # noqa: E402
 from .test_verify import PDF, RootsTrust  # noqa: E402
 
 A4 = (595, 842, 0, None)
-KEY = credentials.PASSWORD_KEY
+PW, USER = credentials.PASSWORD_KEY, credentials.LOGIN_KEY
 
 
 class Recorder:
@@ -32,7 +32,7 @@ class Recorder:
         self.calls, self.result = [], result
 
     def __call__(self, *args, **kwargs):
-        self.calls.append(args)
+        self.calls.append(args + tuple(kwargs.values()))
         return self.result
 
 
@@ -43,7 +43,13 @@ def store(configured):
 
 @pytest.fixture
 def api(make_p7m):
-    return FakeArss(make_p7m=make_p7m, certs=[("NEW_2025:abc-AS0", signer_info("Mario Rossi"))])
+    return FakeArss(make_p7m=make_p7m)
+
+
+def wait_for_workers(qtbot, owner):
+    """No background thread may outlive its test (it would act after the test's isolation is gone)."""
+    running = owner.__dict__.get("_running_workers", [])
+    qtbot.waitUntil(lambda: all(thread.isFinished() for thread, _ in running), timeout=10000)
 
 
 @pytest.fixture
@@ -53,8 +59,9 @@ def window(qtbot, store, api):
     w.ask_otp = Recorder("12345678")
     w.show_error = Recorder()
     w.open_url = Recorder()
-    w.ask_password = Recorder(None)
-    return w
+    w.ask_login = Recorder(None)
+    yield w
+    wait_for_workers(qtbot, w)
 
 
 def wait_for(qtbot, window, page):
@@ -82,9 +89,9 @@ def test_sign_pdf_with_stamp(window, api, qtbot, tmp_path, make_pdf):
     wait_for(qtbot, window, window.result)
     assert window.result.title.text() == "Fatto! 2 documenti firmati."
     assert (tmp_path / "a_firmato.pdf").exists() and (tmp_path / "b_firmato.pdf").exists()
-    assert window.ask_otp.calls == [(2, 0)]
-    assert api.names().count("open_session") == 1
-    assert api.calls[1][4] == "Firmato digitalmente da Mario Rossi\nVisto"
+    assert window.ask_otp.calls == [(2, 0, "")]
+    assert api.names()[:2] == ["list_certs", "open_session"]  # account checked before the OTP is used
+    assert next(c for c in api.calls if c[0] == "sign_pdf")[4] == "Firmato digitalmente da Mario Rossi\nVisto"
     assert config.load().stamp == "si" and config.load().stamp_position == "alto-sinistra"
     window.result.open_folder.click()
     assert window.open_url.calls[-1] == (tmp_path,)
@@ -120,7 +127,26 @@ def test_refused_otp_goes_home_and_warns_next_time(window, api, qtbot, tmp_path,
     assert window.stack.currentWidget() is window.home
     window.prepare_sign(paths, Kind.PADES)
     window.options.sign.click()
-    assert window.ask_otp.calls[-1] == (1, 1)  # the dialog now shows the warning
+    qtbot.waitUntil(lambda: len(window.show_error.calls) == 2, timeout=10000)  # second attempt fully done
+    assert window.ask_otp.calls[-1] == (1, 1, "")  # the dialog showed the warning
+    assert config.load_state().auth_failures == 2
+
+
+def test_wrong_password_stops_before_the_otp(window, api, qtbot, tmp_path, make_pdf):
+    api.certs = CredentialsError("Nome utente, dominio o password non accettati dal servizio di firma Aruba.")
+    window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
+    window.options.sign.click()
+    qtbot.waitUntil(lambda: bool(window.show_error.calls), timeout=10000)
+    assert "non accettati" in window.show_error.calls[0][1]
+    assert window.ask_otp.calls == [] and api.names() == ["list_certs"]
+
+
+def test_expiring_certificate_is_mentioned_in_the_otp_dialog(window, api, qtbot, tmp_path, make_pdf):
+    api.certs = [("x", signer_info("Mario Rossi", days_left=20))]
+    window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
+    window.options.sign.click()
+    wait_for(qtbot, window, window.result)
+    assert "certificato di firma scade il" in window.ask_otp.calls[0][2]
 
 
 def test_partial_batch_and_retry(window, api, qtbot, tmp_path, make_pdf):
@@ -137,37 +163,36 @@ def test_partial_batch_and_retry(window, api, qtbot, tmp_path, make_pdf):
     assert len(window.ask_otp.calls) == 2 and (tmp_path / "b_firmato.pdf").exists()
 
 
-def test_password_asked_and_saved_only_after_success(window, store, api, qtbot, tmp_path, make_pdf):
+def test_first_signature_asks_and_remembers_after_aruba_accepts(window, store, api, qtbot, tmp_path, make_pdf):
     store.data.clear()
-    window.ask_password = Recorder((PASSWORD, True))
-    api.open_error = OtpError(MSG_OTP)
-    paths = pdfs(tmp_path, make_pdf, "a.pdf")
-    window.prepare_sign(paths, Kind.PADES)
-    window.options.sign.click()
-    qtbot.waitUntil(lambda: bool(window.show_error.calls), timeout=10000)
-    assert store.data == {}  # refused: not saved
-    api.open_error = None
-    window.prepare_sign(paths, Kind.PADES)
-    window.options.sign.click()
-    wait_for(qtbot, window, window.result)
-    assert store.data == {KEY: PASSWORD}
-
-
-def test_wrong_typed_password_never_reaches_aruba(window, store, api, tmp_path, make_pdf):
-    store.data.clear()
-    window.ask_password = Recorder(("sbagliata", True))
+    window.login = None
+    window.ask_login = Recorder((("mario.rossi", "firma"), PASSWORD, True))
+    api.open_error = OtpError(MSG_OTP)  # the OTP will fail, but Aruba has already accepted the password
     window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
     window.options.sign.click()
-    assert "La password non apre il profilo" in window.show_error.calls[0][1]
-    assert api.calls == [] and window.ask_otp.calls == [] and store.data == {}
+    qtbot.waitUntil(lambda: bool(window.show_error.calls), timeout=10000)
+    assert window.ask_login.calls == [(True, "Portachiavi di prova")]
+    assert store.data == {USER: "mario.rossi@firma", PW: PASSWORD}
+    assert window.home.account.text() == "Account: mario.rossi@firma"
 
 
-def test_home_shows_account_from_encrypted_profile(window, qtbot, store, api):
+def test_refused_typed_credentials_are_not_remembered(window, store, api, qtbot, tmp_path, make_pdf):
+    store.data.clear()
+    window.login = None
+    window.ask_login = Recorder((("mario.rossi", "firma"), "sbagliata", True))
+    api.certs = CredentialsError("Nome utente, dominio o password non accettati.")
+    window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
+    window.options.sign.click()
+    qtbot.waitUntil(lambda: bool(window.show_error.calls), timeout=10000)
+    assert store.data == {} and window.ask_otp.calls == []
+
+
+def test_home_shows_account_from_the_wallet(window, qtbot, store, api):
     assert window.home.account.text() == "Account: mario.rossi@firma"
     store.data.clear()
-    locked = MainWindow(lambda: api)
-    qtbot.addWidget(locked)
-    assert locked.home.account.text() == "Account configurato"
+    fresh = MainWindow(lambda: api)
+    qtbot.addWidget(fresh)
+    assert fresh.home.account.text() == "Account: verrà chiesto alla prima firma"
 
 
 def test_open_signed_p7m_and_extract(window, qtbot, tmp_path, make_p7m, pki, monkeypatch):
@@ -207,17 +232,6 @@ def test_drop_a_pdf_asks_what_to_do(window, tmp_path, make_pdf):
     assert window.stack.currentWidget() is window.options
 
 
-def test_first_run_opens_setup(qtbot, store, api, tmp_path, make_pdf):
-    vault.delete()
-    w = MainWindow(lambda: api)
-    qtbot.addWidget(w)
-    w.run_setup = Recorder(False)
-    w.choose_files = Recorder(pdfs(tmp_path, make_pdf, "a.pdf"))
-    w.home.sign_pdf.click()
-    assert w.run_setup.calls == [()]  # asked to configure first; cancelled, so nothing else happens
-    assert w.stack.currentWidget() is w.home
-
-
 def test_otp_dialog_validation(qtbot):
     dialog = OtpDialog(None, 3, 0)
     qtbot.addWidget(dialog)
@@ -236,9 +250,8 @@ def test_otp_dialog_validation(qtbot):
     assert cautious.ok.isEnabled()
 
 
-def test_setup_dialog_saves_after_aruba_accepts(qtbot, store, api):
+def test_setup_dialog_keeps_only_the_wallet(qtbot, store, api):
     store.data.clear()
-    vault.delete()
     dialog = SetupDialog(None, lambda: api, first_run=True)
     qtbot.addWidget(dialog)
     dialog.user.setText("mario.rossi@firma")
@@ -246,15 +259,14 @@ def test_setup_dialog_saves_after_aruba_accepts(qtbot, store, api):
     dialog.password.setText("Pw-1")
     dialog.check.click()
     qtbot.waitUntil(lambda: dialog.result() == QDialog.DialogCode.Accepted, timeout=10000)
-    profile = vault.load("Pw-1")
-    assert (profile.user, profile.domain, profile.cert_id, profile.signer_name) == \
-        ("mario.rossi", "firma", "NEW_2025:abc-AS0", "Mario Rossi")
-    assert dialog.profile == profile
-    assert store.data == {KEY: "Pw-1"} and api.calls == [("list_certs", "Pw-1")]
+    assert store.data == {USER: "mario.rossi@firma", PW: "Pw-1"}
+    assert dialog.login == ("mario.rossi", "firma") and api.calls == [("list_certs", "Pw-1")]
+    assert not config.config_dir().exists() or "mario" not in "".join(
+        p.read_text() for p in config.config_dir().iterdir())
 
 
 def test_setup_dialog_refused(qtbot, store, api):
-    vault.delete()
+    store.data.clear()
     api.certs = CredentialsError("Nome utente, dominio o password non accettati.")
     dialog = SetupDialog(None, lambda: api, first_run=True)
     qtbot.addWidget(dialog)
@@ -262,22 +274,26 @@ def test_setup_dialog_refused(qtbot, store, api):
     dialog.password.setText("sbagliata")
     dialog.check.click()
     qtbot.waitUntil(lambda: "non accettati" in dialog.status.text(), timeout=10000)
-    assert dialog.result() != QDialog.DialogCode.Accepted and not vault.exists()
+    assert dialog.result() != QDialog.DialogCode.Accepted and store.data == {}
     assert dialog.check.isEnabled()
 
 
-def test_support_report(window, qtbot):
+def test_support_report(window, qtbot, api):
     window.show_support = Recorder()
     window.home.support.click()
     qtbot.waitUntil(lambda: bool(window.show_support.calls), timeout=10000)
     text = window.show_support.calls[0][0]
-    assert "Account: m*********i@firma" in text and PASSWORD not in text and "mario.rossi" not in text
+    assert "Account: m*********i@firma" in text and "Credenziali: accettate da Aruba" in text
+    assert PASSWORD not in text and "mario.rossi" not in text
 
 
 def test_startup_smoke_test(tmp_path):
     """What the installer runs: build and show the window, exit 0."""
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", XDG_STATE_HOME=str(tmp_path / "s"),
-               XDG_CONFIG_HOME=str(tmp_path / "c"), XDG_CACHE_HOME=str(tmp_path / "k"))
-    code = "from firmaremota.gui.app import main; raise SystemExit(main(['--prova-avvio']))"
+               XDG_CONFIG_HOME=str(tmp_path / "c"), XDG_CACHE_HOME=str(tmp_path / "k"),
+               PYTHON_KEYRING_BACKEND="keyring.backends.fail.Keyring", XDG_CURRENT_DESKTOP="none")
+    code = ("from firmaremota import credentials\n"
+            "credentials.KWalletStore.available = lambda self: False\n"
+            "from firmaremota.gui.app import main; raise SystemExit(main(['--prova-avvio']))")
     result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0 and "ok" in result.stdout

@@ -14,12 +14,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .. import config, credentials, diagnostics, files, messages, service, vault, verify
+import datetime as dt
+
+from .. import config, credentials, diagnostics, files, messages, service, verify
 from ..errors import FileError, FirmaError
 from ..logsetup import log_path, register_paths
 from ..models import LAST_PAGE, JobResult, Kind, Position, SignJob, StampSpec, VerifyReport
 from . import worker
-from .dialogs import OtpDialog, PasswordDialog, SetupDialog, TextDialog
+from .dialogs import LoginDialog, OtpDialog, SetupDialog, TextDialog
 
 log = logging.getLogger("firmaremota.gui")
 
@@ -82,11 +84,8 @@ class HomePage(QWidget):
         row.addWidget(self.support)
         layout.addLayout(row)
 
-    def refresh(self, profile: vault.Profile | None) -> None:
-        if profile is not None:
-            self.account.setText(f"Account: {profile.login}")
-        else:
-            self.account.setText("Account configurato" if vault.exists() else "Account non configurato")
+    def refresh(self, login: tuple[str, str] | None) -> None:
+        self.account.setText(f"Account: {login[0]}@{login[1]}" if login else "Account: verrà chiesto alla prima firma")
 
 
 class OptionsPage(QWidget):
@@ -349,9 +348,9 @@ class MainWindow(QMainWindow):
         self.report_path: Path | None = None
         self.extracted: Path | None = None
         self.cancel_event: threading.Event | None = None
-        self.pending_password: str | None = None
-        self.profile: vault.Profile | None = None  # decrypted account data, kept in memory only
-        self._unlock_quietly()
+        self.pending: dict | None = None  # a signing run between the account check and the OTP
+        self.login: tuple[str, str] | None = None  # (username, domain) from the wallet, shown on the home page
+        self._load_login()
         self.go_home()
 
     # --- seams: everything that asks the user something (tests replace these) ---------------
@@ -362,15 +361,19 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getOpenFileName(self, title, str(Path.home()), filters)[0]
         return [path] if path else []
 
-    def ask_otp(self, count: int, failures: int) -> str | None:
-        dialog = OtpDialog(self, count, failures)
+    def ask_otp(self, count: int, failures: int, note: str = "") -> str | None:
+        dialog = OtpDialog(self, count, failures, note)
         return dialog.value() if dialog.exec() == OtpDialog.DialogCode.Accepted else None
 
-    def ask_password(self, store_name: str | None) -> tuple[str, bool] | None:
-        dialog = PasswordDialog(self, store_name)
-        if dialog.exec() != PasswordDialog.DialogCode.Accepted or not dialog.value()[0]:
+    def ask_login(self, need_user: bool, store_name: str | None):
+        """((user, domain) or None, password, remember), or None if cancelled."""
+        dialog = LoginDialog(self, need_user, store_name)
+        if dialog.exec() != LoginDialog.DialogCode.Accepted:
             return None
-        return dialog.value()
+        login, password, remember = dialog.value()
+        if not password or (need_user and not (login and login[0])):
+            return None
+        return login, password, remember
 
     def ask_yes_no(self, title: str, text: str) -> bool:
         return QMessageBox.question(self, title, text) == QMessageBox.StandardButton.Yes
@@ -387,11 +390,10 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, title, text)
 
     def run_setup(self, first_run: bool) -> bool:
-        dialog = SetupDialog(self, lambda: self.api, first_run, self.profile)
+        dialog = SetupDialog(self, lambda: self.api, first_run, self.login)
         accepted = dialog.exec() == SetupDialog.DialogCode.Accepted
-        if accepted:
-            self.profile = dialog.profile
-        self.home.refresh(self.profile)
+        self.login = dialog.login
+        self.home.refresh(self.login)
         return accepted
 
     def open_url(self, path: Path) -> None:
@@ -406,17 +408,14 @@ class MainWindow(QMainWindow):
         return self._api
 
     def go_home(self) -> None:
-        self.home.refresh(self.profile)
+        self.home.refresh(self.login)
         self.stack.setCurrentWidget(self.home)
 
-    def _unlock_quietly(self) -> None:
-        """Open the profile with the saved password, if there is one (to show the account name)."""
+    def _load_login(self) -> None:
         try:
-            password = credentials.stored_password()
-            if password and vault.exists():
-                self.profile = vault.load(password)
-        except FirmaError as exc:
-            log.info("profilo non aperto all'avvio: %s", exc.message)
+            self.login = credentials.stored_login()
+        except credentials.CredentialStoreError as exc:
+            log.info("portachiavi non disponibile all'avvio: %s", exc.message)
 
     def dragEnterEvent(self, event) -> None:
         if self.stack.currentWidget() is self.home and event.mimeData().hasUrls():
@@ -456,12 +455,7 @@ class MainWindow(QMainWindow):
         if paths:
             self.prepare_sign(paths, Kind.CADES)
 
-    def ensure_configured(self) -> bool:
-        return vault.exists() or self.run_setup(first_run=True)
-
     def prepare_sign(self, paths: list[str], kind: Kind) -> None:
-        if not self.ensure_configured():
-            return
         self.paths = [Path(p) for p in paths]
         if kind is Kind.PADES:
             self.options.load(config.load(), self.paths)
@@ -476,65 +470,73 @@ class MainWindow(QMainWindow):
         spec = self.options.stamp_spec()
         self.sign([SignJob(p, Kind.PADES, spec) for p in self.paths])
 
-    def unlock(self) -> tuple[str, vault.Profile] | None:
-        """Password (wallet, or asked) and decrypted profile. A mistyped password fails here, locally."""
+    def credentials_for_signing(self):
+        """(user, domain, password, remember): from the wallet, asking only for what's missing."""
         store = None
+        password = None
         try:
             store = credentials.get_store()
             password = store.get(credentials.PASSWORD_KEY) if store else None
         except credentials.CredentialStoreError as exc:
             self.show_error("Portachiavi", exc.message)
-            password = None
-        remember = False
-        if not password:
-            answer = self.ask_password(store.name if store else None)
-            if answer is None:
-                return None
-            password, remember = answer
-        try:
-            profile = vault.load(password)
-        except FirmaError as exc:
-            self.show_error("Password", exc.message)
+        login = self.login
+        if login and password:
+            return *login, password, False
+        answer = self.ask_login(need_user=login is None, store_name=store.name if store else None)
+        if answer is None:
             return None
-        self.profile = profile
-        # a typed password is saved only once Aruba has accepted it (when the signing session opens)
-        self.pending_password = password if remember and store else None
-        return password, profile
+        typed_login, password, remember = answer
+        user, domain = login or typed_login
+        return user, domain, password, bool(remember and store)
 
     def sign(self, jobs: list[SignJob]) -> None:
+        """Local checks, then the account check with Aruba (no OTP), then the OTP, then signing."""
         problems = service.preflight(jobs)
         if problems:
             self.show_error("Impossibile firmare", "\n".join(problems) + "\n\nNon è stato usato nessun codice OTP.")
             return
-        settings = config.load()
-        unlocked = self.unlock()
-        if unlocked is None:
+        found = self.credentials_for_signing()
+        if found is None:
             return
-        password, profile = unlocked
-        otp = self.ask_otp(len(jobs), service.auth_failures())
+        user, domain, password, remember = found
+        settings = config.load()
+        self.pending = {"jobs": jobs, "password": password, "remember": remember, "user": user, "domain": domain}
+        self.progress.start("Controllo dell'account con Aruba...", total=None, cancellable=False)
+        self.stack.setCurrentWidget(self.progress)
+        job = worker.Worker(service.prepare_account, self.api, user, domain, password, settings)
+        worker.start(self, job, self.account_ready, self.sign_failed)
+
+    def account_ready(self, result) -> None:
+        account, signer = result
+        pending, self.pending = self.pending, None
+        if pending["remember"]:  # Aruba has just accepted them: now they may go into the wallet
+            try:
+                credentials.save_account(credentials.get_store(), pending["user"], pending["domain"], pending["password"])
+                self.login = (pending["user"], pending["domain"])
+            except credentials.CredentialStoreError as exc:
+                log.warning("credenziali non salvate: %s", exc.message)
+        note = ""
+        if signer.not_after - dt.datetime.now(dt.timezone.utc) < dt.timedelta(days=60):
+            note = f"Attenzione: il certificato di firma scade il {signer.not_after.astimezone():%d/%m/%Y}."
+        jobs = pending["jobs"]
+        otp = self.ask_otp(len(jobs), service.auth_failures(), note)
         if otp is None:
+            self.go_home()
             return
         self.cancel_event = threading.Event()
         self.progress.start("Firma in corso...", total=len(jobs), cancellable=len(jobs) > 1)
-        self.stack.setCurrentWidget(self.progress)
-        job = worker.Worker(service.sign_batch, self.api, service.account_from(profile, settings), password, otp,
-                            jobs, signer_name=profile.signer_name or None, cancel=self.cancel_event)
+        job = worker.Worker(service.sign_batch, self.api, account, pending["password"], otp, jobs,
+                            signer_name=signer.name, cancel=self.cancel_event)
         job.kwargs["progress"] = job.report
         worker.start(self, job, self.sign_done, self.sign_failed, self.progress.update_progress)
 
     def sign_done(self, results: list[JobResult]) -> None:
-        if self.pending_password:
-            try:
-                credentials.get_store().set(credentials.PASSWORD_KEY, self.pending_password)
-            except (credentials.CredentialStoreError, AttributeError) as exc:
-                log.warning("password non salvata: %s", exc)
-            self.pending_password = None
         self.results = results
         self.result.show_results(results)
         self.stack.setCurrentWidget(self.result)
 
     def sign_failed(self, exc: Exception) -> None:
-        self.pending_password = None
+        self.pending = None
         self.go_home()
         self.show_error("Firma non riuscita", _error_text(exc))
 
@@ -596,7 +598,8 @@ class MainWindow(QMainWindow):
             password = credentials.stored_password()
         except credentials.CredentialStoreError:
             password = None
-        worker.start(self, worker.Worker(diagnostics.report, self.api, password), self.support_done, self.verify_failed)
+        job = worker.Worker(diagnostics.report, self.api, password, check_account=password is not None)
+        worker.start(self, job, self.support_done, self.verify_failed)
 
     def support_done(self, lines) -> None:
         self.go_home()

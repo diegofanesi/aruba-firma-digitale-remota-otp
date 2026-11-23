@@ -52,15 +52,13 @@ def test_settings_hold_no_personal_data():
     assert set(config.Settings.__dataclass_fields__) == {"type_hsm", "stamp", "stamp_page", "stamp_position"}
 
 
-def test_settings_ignore_unknown_keys_and_drop_legacy_section():
+def test_settings_ignore_unknown_keys_and_rewrite_only_preferences():
     path = config.config_path()
     path.parent.mkdir(parents=True)
-    path.write_text("[account]\nuser = a\ndomain = firma\n[preferenze]\nstamp = si\nvecchia_opzione = 1\n")
+    path.write_text("[account]\nuser = a\n[preferenze]\nstamp = si\nvecchia_opzione = 1\n")
     assert config.load() == config.Settings(stamp="si")
-    assert config.legacy_account() == {"user": "a", "domain": "firma", "cert_id": "", "signer_name": "",
-                                       "cert_expires": ""}
     config.save(config.load())
-    assert config.legacy_account() is None and "user" not in path.read_text()
+    assert "[account]" not in path.read_text() and "user" not in path.read_text()
 
 
 def test_state_roundtrip_and_corruption():
@@ -85,7 +83,7 @@ def test_secret_service_store(memory_keyring, monkeypatch):
     key = credentials.PASSWORD_KEY
     assert store.get(key) is None
     store.set(key, "Pw-segreta")
-    assert memory_keyring.data[("firma-remota", "account")] == "Pw-segreta"
+    assert memory_keyring.data[("firma-remota", "password")] == "Pw-segreta"
     assert credentials.stored_password() == "Pw-segreta"
     assert store.get(key) == "Pw-segreta"
     store.delete(key)

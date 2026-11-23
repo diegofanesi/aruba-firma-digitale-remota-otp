@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import threading
 from collections.abc import Callable
@@ -10,7 +11,7 @@ from pathlib import Path
 from . import config, files, p7m, stamp
 from .arss.client import ArssApi
 from .errors import CredentialsError, FileError, FirmaError, OtpError, ServiceError
-from .logsetup import register_paths, register_secret
+from .logsetup import register_paths, register_personal, register_secret
 from .models import Account, AuthCtx, JobResult, Kind, SignerInfo, SignJob
 
 log = logging.getLogger("firmaremota.service")
@@ -21,11 +22,30 @@ NOT_REACHED = "Non firmato: la firma si è interrotta per l'errore precedente."
 CANCELLED = "Non firmato: annullato."
 
 
-def account_from(profile, settings: config.Settings) -> Account:
-    """ARSS account from the decrypted profile (vault.Profile) and the preferences."""
-    if not profile.complete:
-        raise CredentialsError("Configurazione incompleta: esegui prima 'firma configura'.")
-    return Account(profile.user, profile.domain, profile.cert_id, settings.type_hsm)
+def pick_certificate(certs: list[tuple[str, SignerInfo]], now: dt.datetime | None = None) -> tuple[str, SignerInfo]:
+    """The certificate valid now with the latest expiry (after a renewal both may be listed)."""
+    if not certs:
+        raise CredentialsError("Aruba non ha trovato certificati di firma per questo account.")
+    now = now or dt.datetime.now(dt.timezone.utc)
+    valid = [c for c in certs if c[1].not_before <= now <= c[1].not_after]
+    if not valid:
+        raise CredentialsError("Il certificato di firma è scaduto: va rinnovato con Aruba.")
+    return max(valid, key=lambda c: c[1].not_after)
+
+
+def prepare_account(api: ArssApi, user: str, domain: str, password: str,
+                    settings: config.Settings | None = None) -> tuple[Account, SignerInfo]:
+    """Ask Aruba for the certificate (password only, no OTP): nothing about it is stored locally.
+
+    This also proves the password is right before an OTP is asked for.
+    """
+    settings = settings or config.load()
+    register_secret(password)
+    register_personal(f"{user}@{domain}", user)
+    certs = check_credentials(api, Account(user, domain, cert_id="", type_hsm=settings.type_hsm), password)
+    cert_id, signer = pick_certificate(certs)
+    register_personal(signer.name)
+    return Account(user, domain, cert_id, settings.type_hsm), signer
 
 
 def stamp_text(signer_name: str | None, extra: str = "") -> str:
@@ -90,15 +110,6 @@ def check_credentials(api: ArssApi, account: Account, password: str) -> list[tup
     except CredentialsError:
         _record_auth(False)
         raise
-
-
-def fetch_signer_name(api: ArssApi, account: Account, password: str) -> str | None:
-    """Certificate holder's name, for the visible stamp."""
-    certs = check_credentials(api, account, password)
-    for cert_id, signer in certs:
-        if cert_id == account.cert_id:
-            return signer.name
-    return certs[0][1].name if certs else None
 
 
 def _sign_one(api: ArssApi, auth: AuthCtx, job: SignJob, out_dir: Path | None, signer_name: str | None) -> Path:

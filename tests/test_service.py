@@ -120,21 +120,28 @@ def test_progress_and_output_folder(docs, make_p7m, tmp_path):
     assert sorted(p.name for p in out.iterdir()) == ["a_firmato.pdf", "b_firmato.pdf", "c.xml.p7m"]
 
 
-def test_fetch_signer_name():
-    api = FakeArss(certs=[("altro", signer_info("Altro Nome")), ("NEW_2025:abc-AS0", signer_info("Mario Rossi"))])
-    assert service.fetch_signer_name(api, ACCOUNT, "pw") == "Mario Rossi"
+def test_password_only_check_and_the_failure_counter():
     config.save_state(config.State(auth_failures=1))
-    service.fetch_signer_name(api, ACCOUNT, "pw")
+    service.check_credentials(FakeArss(), ACCOUNT, "pw")
     assert service.auth_failures() == 1  # a password-only success doesn't clear an OTP failure
     with pytest.raises(CredentialsError):
-        service.fetch_signer_name(FakeArss(certs=CredentialsError("no")), ACCOUNT, "pw")
+        service.check_credentials(FakeArss(certs=CredentialsError("no")), ACCOUNT, "pw")
     assert service.auth_failures() == 2
 
 
-def test_account_from_profile():
-    from firmaremota import vault
+def test_prepare_account_fetches_the_certificate_each_time():
+    api = FakeArss(certs=[("NEW_2025:abc-AS0", signer_info("Mario Rossi"))])
+    account, signer = service.prepare_account(api, "mario.rossi", "firma", "pw")
+    assert (account.user, account.domain, account.cert_id, account.type_hsm) == \
+        ("mario.rossi", "firma", "NEW_2025:abc-AS0", "COSIGN")
+    assert signer.name == "Mario Rossi" and api.calls == [("list_certs", "pw")]
 
-    with pytest.raises(CredentialsError, match="configura"):
-        service.account_from(vault.Profile("a", "firma", ""), config.Settings())
-    account = service.account_from(vault.Profile("a", "firma", "X"), config.Settings(type_hsm="COSIGN"))
-    assert (account.user, account.domain, account.cert_id, account.type_hsm) == ("a", "firma", "X", "COSIGN")
+
+def test_pick_certificate_after_renewal():
+    old, new = ("vecchio", signer_info("Mario Rossi", days_left=20)), ("nuovo", signer_info("Mario Rossi", days_left=700))
+    expired = ("scaduto", signer_info("Mario Rossi", days_left=-1))
+    assert service.pick_certificate([old, expired, new])[0] == "nuovo"
+    with pytest.raises(CredentialsError, match="scaduto"):
+        service.pick_certificate([expired])
+    with pytest.raises(CredentialsError, match="non ha trovato"):
+        service.pick_certificate([])

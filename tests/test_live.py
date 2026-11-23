@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from firmaremota import config, credentials, p7m, service, vault, verify
+from firmaremota import config, credentials, p7m, service, verify
 from firmaremota.arss.client import ArssClient
 from firmaremota.models import Kind, SignJob, StampSpec
 
@@ -18,14 +18,25 @@ pytestmark = [
     pytest.mark.live,
     pytest.mark.skipif(os.environ.get("FIRMA_LIVE") != "1", reason="live test: set FIRMA_LIVE=1 and FIRMA_OTP"),
 ]
-REAL_CONFIG = Path.home() / ".config" / "firma-remota" / "config.ini"
-REAL_PROFILE = Path.home() / ".config" / "firma-remota" / "profilo.enc"
+REAL_HOME = Path(os.environ.get("FIRMA_REAL_HOME") or Path.home())  # conftest sandboxes HOME
+REAL_CONFIG = REAL_HOME / ".config" / "firma-remota" / "config.ini"
 
 
-def test_one_session_signs_and_verifies_everything(tmp_path, make_pdf):
-    password = credentials.stored_password()
-    assert password, "no password in the wallet: run 'firma configura' first"
-    account = service.account_from(vault.load(password, REAL_PROFILE), config.load(REAL_CONFIG))
+@pytest.fixture
+def real_wallet(monkeypatch):
+    """Undo the test isolation: this test uses the real wallet on purpose."""
+    import keyring
+    from keyring.core import init_backend
+
+    keyring.set_keyring(init_backend())
+    monkeypatch.undo()
+
+
+def test_one_session_signs_and_verifies_everything(real_wallet, tmp_path, make_pdf):
+    login, password = credentials.stored_login(), credentials.stored_password()
+    assert login and password, "username/password not in the wallet: run 'firma configura' first"
+    api = ArssClient()
+    account, signer = service.prepare_account(api, *login, password, config.load(REAL_CONFIG))
     out = Path(os.environ.get("FIRMA_LIVE_DIR") or tmp_path / "firmati")
     out.mkdir(parents=True, exist_ok=True)
 
@@ -41,10 +52,8 @@ def test_one_session_signs_and_verifies_everything(tmp_path, make_pdf):
     ]
     assert service.preflight(jobs, out) == []
 
-    api = ArssClient()
-    signer_name = service.fetch_signer_name(api, account, password)
     results = service.sign_batch(api, account, password, os.environ["FIRMA_OTP"], jobs,
-                                 out_dir=out, signer_name=signer_name)
+                                 out_dir=out, signer_name=signer.name)
     assert [r.error.message if r.error else None for r in results] == [None, None, None]
 
     trust = verify.default_trust()

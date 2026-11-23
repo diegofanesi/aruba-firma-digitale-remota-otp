@@ -31,14 +31,11 @@ def config_path() -> Path:
 
 
 _SECTION = "preferenze"
-# Before the encrypted profile existed, account data sat in plain text in an [account] section.
-_LEGACY_SECTION = "account"
-_LEGACY_FIELDS = ("user", "domain", "cert_id", "signer_name", "cert_expires")
 
 
 @dataclass
 class Settings:
-    """Non-personal preferences only. Account data lives in the encrypted profile (vault.py)."""
+    """Non-personal preferences only. The account (username@domain, password) lives in the wallet."""
 
     type_hsm: str = "COSIGN"
     stamp: str = "no"  # GUI: remember whether a visible stamp was wanted ("si"/"no")
@@ -60,7 +57,7 @@ def load(path: Path | None = None) -> Settings:
 
 
 def save(settings: Settings, path: Path | None = None) -> Path:
-    """Write the preferences. Any legacy plain-text account data in the file is dropped."""
+    """Write the preferences (the whole file is rewritten)."""
     path = path or config_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     parser = configparser.ConfigParser(interpolation=None)
@@ -73,15 +70,6 @@ def save(settings: Settings, path: Path | None = None) -> Path:
         os.fsync(f.fileno())
     os.replace(tmp, path)
     return path
-
-
-def legacy_account(path: Path | None = None) -> dict[str, str] | None:
-    """Plain-text account data left by older versions, if any."""
-    parser = _read(path or config_path())
-    if not parser.has_section(_LEGACY_SECTION):
-        return None
-    values = {k: parser[_LEGACY_SECTION].get(k, "") for k in _LEGACY_FIELDS}
-    return values if values["user"] and values["domain"] else None
 
 
 @dataclass

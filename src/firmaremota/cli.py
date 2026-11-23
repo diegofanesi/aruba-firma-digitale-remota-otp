@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import getpass
 import logging
 import re
 import sys
 from pathlib import Path
 
-from . import __version__, config, credentials, diagnostics, files, logsetup, messages, p7m, service, vault, verify
+from . import __version__, config, credentials, diagnostics, files, logsetup, messages, p7m, service, verify
 from .errors import CredentialsError, FirmaError, OtpError
-from .models import LAST_PAGE, Account, Kind, Position, SignJob, StampSpec
+from .models import LAST_PAGE, Kind, Position, SignerInfo, SignJob, StampSpec
 
 log = logging.getLogger("firmaremota.cli")
 
@@ -41,19 +42,40 @@ def _password() -> str | None:
         return None
 
 
-def _unlock() -> tuple[str, vault.Profile]:
-    """Password (from the wallet, or typed) and the decrypted profile.
+def _login() -> tuple[str, str]:
+    """Username and domain from the wallet, or typed (then nothing is stored)."""
+    try:
+        login = credentials.stored_login()
+    except credentials.CredentialStoreError as exc:
+        print(f"Avviso: {exc.message}", file=sys.stderr)
+        login = None
+    if login:
+        return login
+    if not sys.stdin.isatty():
+        raise CredentialsError("Nome utente non salvato: esegui 'firma configura'.")
+    raw = input("Nome utente Aruba (utente@dominio): ").strip()
+    if not raw:
+        raise CredentialsError("Serve il nome utente.")
+    user, domain = credentials.split_login(raw)
+    logsetup.register_personal(f"{user}@{domain}", user)
+    return user, domain
 
-    A wrongly typed password fails here, on this computer, without contacting Aruba.
-    """
-    if not vault.exists():
-        raise CredentialsError("Account non configurato: esegui 'firma configura'.")
+
+def _credentials() -> tuple[str, str, str]:
+    user, domain = _login()
     password = _password()
     if not password:
         if not sys.stdin.isatty():
             raise CredentialsError("La password non è salvata: esegui 'firma configura'.")
         password = getpass.getpass("Password Aruba: ")
-    return password, vault.load(password)
+    return user, domain, password
+
+
+def _warn_expiry(signer: SignerInfo) -> None:
+    left = signer.not_after - dt.datetime.now(dt.timezone.utc)
+    if left < dt.timedelta(days=60):
+        print(f"Attenzione: il certificato di firma scade il {signer.not_after.astimezone():%d/%m/%Y}: "
+              "rinnovalo per tempo.", file=sys.stderr)
 
 
 def _ask_otp() -> str:
@@ -101,10 +123,11 @@ def _sign(args: argparse.Namespace, kind: Kind) -> int:
         print("Nessun file è stato firmato e non è stato usato alcun codice OTP.", file=sys.stderr)
         return EXIT_ERROR
 
-    password, profile = _unlock()
-    account = service.account_from(profile, settings)
+    user, domain, password = _credentials()
     api = make_api()
     _confirm_after_failures()
+    account, signer = service.prepare_account(api, user, domain, password, settings)
+    _warn_expiry(signer)
     if len(jobs) > 1:
         print(f"Firmo {len(jobs)} file con un solo codice OTP.")
     otp = _ask_otp()
@@ -114,7 +137,7 @@ def _sign(args: argparse.Namespace, kind: Kind) -> int:
             print(f"[{done + 1}/{total}] {name}")
 
     results = service.sign_batch(api, account, password, otp, jobs, out_dir=out_dir,
-                                 signer_name=profile.signer_name or None, progress=progress)
+                                 signer_name=signer.name, progress=progress)
     for result in results:
         if result.ok:
             print(f"Firmato: {result.output}")
@@ -173,100 +196,58 @@ def _ask_account(default_user: str, default_domain: str) -> tuple[str, str]:
     return user, domain
 
 
-def _choose_certificate(certs):
-    if not certs:
-        raise CredentialsError("Aruba non ha trovato certificati di firma per questo account.")
-    if len(certs) == 1:
-        return certs[0]
-    print("Questo account ha più certificati:")
-    for number, (_, signer) in enumerate(certs, start=1):
-        print(f"  {number}. {signer.name}, valido fino al {signer.not_after.astimezone():%d/%m/%Y}")
-    choice = input(f"Quale usare? [1-{len(certs)}] ").strip() or "1"
-    if not choice.isdigit() or not 1 <= int(choice) <= len(certs):
-        raise FirmaError("Scelta non valida: nulla è stato salvato.")
-    return certs[int(choice) - 1]
-
-
-def _save_password(store, key: str, password: str) -> None:
-    store.set(key, password)
-    if store.get(key) != password:
-        raise credentials.CredentialStoreError("Il portachiavi non ha restituito la password appena salvata.")
-
-
-def _current_profile() -> vault.Profile | None:
-    """The existing profile, if the saved password opens it (used for defaults only)."""
-    password = _password()
-    if not (password and vault.exists()):
-        return None
-    try:
-        return vault.load(password)
-    except vault.VaultError:
-        return None
-
-
-def _change_password(api, store) -> int:
-    new = _new_password()
-    try:
-        profile = vault.load(new)  # same password as before: just remember it
-    except vault.VaultError:
-        old = _password() or getpass.getpass("Password precedente (quella che apriva il profilo): ")
-        profile = vault.load(old)
-    print("Controllo la password con Aruba (non serve il codice OTP)...")
-    service.check_credentials(api, service.account_from(profile, config.load()), new)
-    vault.save(profile, new)
-    _save_password(store, credentials.PASSWORD_KEY, new)
-    print(f"Password salvata in {store.name}; profilo cifrato di nuovo con la nuova password.")
-    return EXIT_OK
-
-
 def cmd_configura(args: argparse.Namespace) -> int:
     store = credentials.get_store()
-    if args.dimentica_password:
-        if store and store.get(credentials.PASSWORD_KEY):
+    if args.dimentica_password or args.dimentica_tutto:
+        if store is None:
+            print("Su questo computer non c'è un portachiavi: non c'era nulla di salvato.")
+            return EXIT_OK
+        if args.dimentica_tutto:
+            credentials.forget_account(store)
+            print(f"Nome utente e password rimossi da {store.name}.")
+        else:
             store.delete(credentials.PASSWORD_KEY)
             print(f"Password rimossa da {store.name}: verrà chiesta a ogni firma.")
-        else:
-            print("Non c'era nessuna password salvata.")
         return EXIT_OK
     if not sys.stdin.isatty():
         raise FirmaError("'firma configura' va eseguito in un terminale.")
     api = make_api()
+    current = credentials.stored_login()
+
     if args.salva_password:
         if store is None:
             raise FirmaError("Nessun portachiavi disponibile su questo computer.")
-        if not vault.exists():
-            raise CredentialsError("Account non configurato: esegui 'firma configura'.")
-        return _change_password(api, store)
+        user, domain = current or _ask_account("", "firma")
+        password = _new_password()
+        print("Controllo la password con Aruba (non serve il codice OTP)...")
+        service.prepare_account(api, user, domain, password)
+        credentials.save_account(store, user, domain, password)
+        print(f"Password salvata in {store.name}.")
+        return EXIT_OK
 
     print("Configurazione della firma remota Aruba.\n")
-    current = _current_profile()
-    user, domain = _ask_account(current.user if current else "", current.domain if current else "firma")
-    save = store is not None and _yes(f"Salvare la password in {store.name}?")
+    user, domain = _ask_account(*(current or ("", "firma")))
+    save = store is not None and _yes(f"Ricordare nome utente e password in {store.name}?")
     password = _new_password() if save else getpass.getpass("Password Aruba: ")
     print("Controllo le credenziali con Aruba (non serve il codice OTP)...")
-    certs = service.check_credentials(api, Account(user, domain, cert_id=""), password)
-    cert_id, signer = _choose_certificate(certs)
-
-    profile = vault.Profile(user, domain, cert_id, signer.name, signer.not_after.date().isoformat())
-    path = vault.save(profile, password)
-    vault.register_personal(profile)
+    _, signer = service.prepare_account(api, user, domain, password)
     if store is not None:
         if save:
-            _save_password(store, credentials.PASSWORD_KEY, password)
+            credentials.save_account(store, user, domain, password)
         else:
-            store.delete(credentials.PASSWORD_KEY)  # an older saved password would no longer open the profile
-        store.delete(credentials.legacy_key(user, domain))
-    config.save(config.load())  # drops plain-text account data left by older versions
+            credentials.forget_account(store)
 
     print(f"\nFatto. Certificato di {signer.name}, valido fino al {signer.not_after.astimezone():%d/%m/%Y}.")
-    print(f"Dati dell'account cifrati (AES-256) in {path}.")
-    print(f"Password salvata in {store.name}." if save else "La password verrà chiesta a ogni firma.")
+    if save:
+        print(f"Nome utente e password sono in {store.name}; sul disco non viene salvato nient'altro.")
+    else:
+        print("Non è stato salvato nulla: nome utente e password verranno chiesti a ogni firma.")
     return EXIT_OK
 
 
 def cmd_diagnostica(args: argparse.Namespace) -> int:
-    password = _password()
-    if args.account and not password and vault.exists() and sys.stdin.isatty():
+    password = _password() if args.account else None
+    if args.account and not password and sys.stdin.isatty():
         password = getpass.getpass("Password Aruba: ")
     lines = diagnostics.report(make_api(), password, check_account=args.account)
     print(diagnostics.as_text(lines))
@@ -356,12 +337,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     configura = commands.add_parser(
         "configura", help="imposta account Aruba, dominio e password",
-        description="Imposta nome utente, dominio di firma e password; controlla le credenziali con Aruba "
-                    "(senza codice OTP) e sceglie il certificato di firma.",
+        description="Imposta nome utente, dominio di firma e password e li controlla con Aruba (senza codice "
+                    "OTP). Se scegli di ricordarli finiscono solo nel portachiavi: sul disco non si salva nulla.",
     )
     only = configura.add_mutually_exclusive_group()
     only.add_argument("--salva-password", action="store_true", help="salva (o cambia) solo la password")
     only.add_argument("--dimentica-password", action="store_true", help="cancella la password dal portachiavi")
+    only.add_argument("--dimentica-tutto", action="store_true", help="cancella nome utente e password dal portachiavi")
     configura.set_defaults(handler=cmd_configura)
 
     diagnostica = commands.add_parser(
@@ -380,14 +362,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _migrate() -> None:
-    try:
-        if vault.migrate_legacy():
-            print(f"Nota: i dati dell'account ora sono cifrati (AES-256) in {vault.path()}.", file=sys.stderr)
-    except Exception as exc:  # never block a command because of the one-time migration
-        log.warning("migrazione del profilo non riuscita: %s", exc)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -398,7 +372,6 @@ def main(argv: list[str] | None = None) -> int:
         logsetup.setup(debug=args.debug, console=args.debug)
     except OSError as exc:
         print(f"Avviso: impossibile scrivere il registro ({exc.strerror}).", file=sys.stderr)
-    _migrate()
     try:
         return args.handler(args)
     except FirmaError as exc:

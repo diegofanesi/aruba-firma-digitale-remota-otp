@@ -31,6 +31,14 @@ class Worker(QObject):
 
 def start(owner: QObject, worker: Worker, on_done: Callable, on_error: Callable,
           on_progress: Callable | None = None) -> QThread:
+    """Run `worker` on a new thread; its signals are delivered on the GUI thread.
+
+    The owner holds Python references to the thread and the worker until the thread has finished:
+    a QThread's Python wrapper can be garbage-collected while Qt keeps the thread running, and a
+    worker freed that way would crash Qt. Finished pairs are released at the next start().
+    """
+    running = owner.__dict__.setdefault("_running_workers", [])
+    running[:] = [(t, w) for t, w in running if not t.isFinished()]
     thread = QThread(owner)
     worker.moveToThread(thread)
     thread.started.connect(worker.run)
@@ -40,8 +48,6 @@ def start(owner: QObject, worker: Worker, on_done: Callable, on_error: Callable,
         worker.progress.connect(on_progress)
     worker.done.connect(thread.quit)
     worker.failed.connect(thread.quit)
-    thread.finished.connect(worker.deleteLater)
-    thread.finished.connect(thread.deleteLater)
-    thread._worker = worker  # keep the worker alive as long as its thread
+    running.append((thread, worker))
     thread.start()
     return thread
