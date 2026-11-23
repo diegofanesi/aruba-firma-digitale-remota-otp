@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from asn1crypto import cms, x509
@@ -62,19 +63,27 @@ def is_p7m(data: bytes) -> bool:
         return False
 
 
-def unwrap(data: bytes, max_depth: int = 10) -> Unwrapped:
-    """The original document inside one or more nested .p7m envelopes, plus who signed each layer."""
-    layers: list[list[SignerInfo]] = []
+def iter_layers(data: bytes, max_depth: int = 10) -> Iterator[tuple[cms.SignedData, bytes]]:
+    """(envelope, the bytes it signs) for each nested .p7m layer, outermost first."""
     current = data
-    while True:
+    for _ in range(max_depth):
         signed = _signed_data(current)
-        layers.append(signers(signed))
         content = signed["encap_content_info"]["content"]
         if content.native is None:
             raise FileError("Firma separata: il documento originale non è incluso nel file .p7m.")
         current = content.native if isinstance(content.native, bytes) else content.contents
-        if len(layers) >= max_depth or not is_p7m(current):
-            return Unwrapped(current, layers)
+        yield signed, current
+        if not is_p7m(current):
+            return
+
+
+def unwrap(data: bytes, max_depth: int = 10) -> Unwrapped:
+    """The original document inside one or more nested .p7m envelopes, plus who signed each layer."""
+    layers: list[list[SignerInfo]] = []
+    content = data
+    for signed, content in iter_layers(data, max_depth):
+        layers.append(signers(signed))
+    return Unwrapped(content, layers)
 
 
 def signers(signed: cms.SignedData) -> list[SignerInfo]:
@@ -98,11 +107,18 @@ def _signer_info(si: cms.SignerInfo, certs: list[x509.Certificate]) -> SignerInf
     cert = _find_cert(si["sid"], certs)
     if cert is None:
         raise FileError("Il file .p7m non contiene il certificato del firmatario.")
-    signing_time = None
+    return signer_from_cert(cert, signing_time(si))
+
+
+def signing_time(si: cms.SignerInfo):
     attrs = si["signed_attrs"]
     for attr in attrs if isinstance(attrs, cms.CMSAttributes) else []:
         if attr["type"].native == "signing_time":
-            signing_time = attr["values"][0].native
+            return attr["values"][0].native
+    return None
+
+
+def signer_from_cert(cert: x509.Certificate, signed_at=None) -> SignerInfo:
     subject = cert.subject.native
     name = subject.get("common_name") or " ".join(
         p for p in (subject.get("given_name"), subject.get("surname")) if p
@@ -118,7 +134,7 @@ def _signer_info(si: cms.SignerInfo, certs: list[x509.Certificate]) -> SignerInf
         fiscal_code=fiscal_code,
         serial=format(cert.serial_number, "X"),
         issuer=issuer,
-        signing_time=signing_time,
+        signing_time=signed_at,
         not_before=validity["not_before"].native,
         not_after=validity["not_after"].native,
         qualified=qualified,

@@ -1,9 +1,10 @@
 """Stamp placement: from the page as the user sees it to the rectangle ARSS expects.
 
-ARSS takes the stamp rectangle in PDF user space (points, origin bottom-left, 1-based page),
-verified in Phase 0. Users think in terms of the page as displayed, so presets and explicit
-rectangles are expressed in displayed coordinates and mapped back here, taking the page's
-/Rotate and a CropBox that doesn't start at (0, 0) into account.
+Verified live: ARSS takes points with the origin at the bottom-left and 1-based pages, and it
+compensates a page's /Rotate itself (given displayed coordinates on a 90° page it computes the
+rotated widget rectangle and an upright appearance). So we send displayed coordinates as they
+are; only an unrotated page's CropBox offset is added. For rotated pages whose CropBox differs
+from the MediaBox, ARSS's own mapping decides (not verified; rare).
 """
 
 from __future__ import annotations
@@ -53,20 +54,11 @@ def _preset(spec: StampSpec, width: float, height: float) -> tuple[float, float,
     return left, bottom, left + w, bottom + h
 
 
-def _to_user_space(page: PageObject, x: float, y: float) -> tuple[float, float]:
-    """Displayed point -> PDF user space. /Rotate turns the page clockwise when it is shown."""
-    box = page.cropbox
-    x0, y0, w, h = float(box.left), float(box.bottom), float(box.width), float(box.height)
-    rotation = _rotation(page)
-    if rotation == 90:
-        u, v = w - y, x
-    elif rotation == 180:
-        u, v = w - x, h - y
-    elif rotation == 270:
-        u, v = y, h - x
-    else:
-        u, v = x, y
-    return x0 + u, y0 + v
+def _to_arss(page: PageObject, x: float, y: float) -> tuple[float, float]:
+    if _rotation(page) == 0:
+        box = page.cropbox
+        return float(box.left) + x, float(box.bottom) + y
+    return x, y
 
 
 def resolve(pdf: bytes, spec: StampSpec) -> ResolvedStamp:
@@ -81,7 +73,7 @@ def resolve(pdf: bytes, spec: StampSpec) -> ResolvedStamp:
     x1, y1, x2, y2 = spec.rect if spec.rect else _preset(spec, width, height)
     if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
         raise FileError("Il timbro di firma esce dai bordi della pagina.")
-    (ax, ay), (bx, by) = _to_user_space(page, x1, y1), _to_user_space(page, x2, y2)
+    (ax, ay), (bx, by) = _to_arss(page, x1, y1), _to_arss(page, x2, y2)
     return ResolvedStamp(
         page=number,
         llx=round(min(ax, bx)),

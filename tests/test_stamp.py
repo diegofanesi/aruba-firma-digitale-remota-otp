@@ -23,10 +23,10 @@ def test_landscape(make_pdf):
 @pytest.mark.parametrize(
     ("rotation", "expected"),
     [
-        # Shown bottom-right on screen = this corner of the unrotated page.
-        (90, ResolvedStamp(1, 489, 606, 559, 806)),  # top-right
-        (180, ResolvedStamp(1, 36, 736, 236, 806)),  # top-left
-        (270, ResolvedStamp(1, 36, 36, 106, 236)),  # bottom-left
+        # Displayed coordinates go to ARSS unchanged: it maps them through /Rotate itself (verified live).
+        (90, ResolvedStamp(1, 606, 36, 806, 106)),  # shown landscape: 842 x 595
+        (180, ResolvedStamp(1, 359, 36, 559, 106)),
+        (270, ResolvedStamp(1, 606, 36, 806, 106)),
     ],
 )
 def test_rotated_pages(make_pdf, rotation, expected):

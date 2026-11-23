@@ -8,6 +8,7 @@ dependencies = [
     "keyring>=25",
     "asn1crypto>=1.5",
     "pypdf>=5",
+    "pyhanko[etsi,requests]>=0.38",
 ]
 
 [project.scripts]

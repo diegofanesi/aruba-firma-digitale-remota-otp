@@ -59,7 +59,7 @@ class StampSpec:
 
 @dataclass(frozen=True)
 class ResolvedStamp:
-    """Stamp rectangle in PDF user space, as ARSS expects it (points, 1-based page)."""
+    """Stamp rectangle as ARSS expects it: points, 1-based page, displayed orientation (ARSS handles /Rotate)."""
 
     page: int
     llx: int
@@ -96,3 +96,35 @@ class SignerInfo:
     not_before: dt.datetime
     not_after: dt.datetime
     qualified: bool
+
+
+@dataclass(frozen=True)
+class SignatureCheck:
+    """Outcome of checking one signature."""
+
+    signer: SignerInfo
+    intact: bool  # the signed data has not changed since signing
+    valid: bool  # the signature matches the signer's certificate
+    trusted: bool  # the certificate chains to an authority on the trusted list and is in force now
+    revoked: bool
+    revocation_checked: bool  # False: revocation status could not be fetched (offline?)
+    qualified: bool | None  # qualified electronic signature per the trusted list; None = can't tell
+    covers_document: bool = True  # PDF: no disallowed changes after this signature
+
+    @property
+    def ok(self) -> bool:
+        return self.intact and self.valid and self.trusted and not self.revoked and self.covers_document
+
+
+@dataclass(frozen=True)
+class VerifyReport:
+    kind: Kind
+    checks: list[SignatureCheck]  # .p7m: outermost envelope first
+    trust_list_date: dt.datetime | None  # when the trusted list was downloaded; None = not available
+    trust_list_stale: bool = False
+    content: bytes | None = field(default=None, repr=False)  # the document inside a .p7m
+    content_name: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.checks) and all(c.ok for c in self.checks)

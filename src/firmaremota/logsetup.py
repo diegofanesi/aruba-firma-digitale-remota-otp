@@ -15,6 +15,7 @@ MASK = "***"
 _secrets: set[str] = set()
 # zeep logs whole SOAP envelopes (password and OTP included) at DEBUG; these never go below WARNING.
 _NOISY = ("zeep", "urllib3", "requests")
+_LIBRARIES = ("pyhanko", "pyhanko_certvalidator")
 
 
 def register_secret(*values: str | None) -> None:
@@ -63,6 +64,12 @@ def setup(debug: bool = False, console: bool = False, directory: Path | None = N
     logger.propagate = False
     for name in _NOISY:
         logging.getLogger(name).setLevel(logging.WARNING)
+    # pyHanko logs full tracebacks for expected outcomes (e.g. an untrusted chain): file only.
+    for name in _LIBRARIES:
+        library = logging.getLogger(name)
+        library.handlers[:] = [handler]
+        library.setLevel(logging.WARNING)
+        library.propagate = False
 
     crash_file = directory / "crash.log"
     _private_file(crash_file)

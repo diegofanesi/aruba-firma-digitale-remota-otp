@@ -21,6 +21,11 @@ def state_dir() -> Path:
     return Path(base) / APP_NAME
 
 
+def cache_dir() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
+    return Path(base) / APP_NAME
+
+
 def config_path() -> Path:
     return config_dir() / "config.ini"
 
@@ -31,7 +36,7 @@ class Settings:
     domain: str = ""  # ARSS typeOtpAuth
     cert_id: str = "AS0"
     type_hsm: str = "COSIGN"
-    tsa_user: str = ""
+    signer_name: str = ""  # certificate holder, written in the visible stamp
 
     @property
     def complete(self) -> bool:

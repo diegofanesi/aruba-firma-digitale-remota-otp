@@ -30,7 +30,17 @@ which is gitignored because it contains certificate data).
   **1-based**; `leftx/lefty/rightx/righty` = lower-left and upper-right corners. The rendered stamp shows
   `testo` plus, with `bShowDateTime`, a line like `23.11.2026 17:08:59 UTC`, top-left aligned in small type.
   `reason` and `location` are **not** drawn, and the signer's name is **not** added automatically: the app
-  must put "Firmato digitalmente da <CN>" into `testo` itself.
+  must put "Firmato digitalmente da <CN>" into `testo` itself. `\n` in `testo` gives separate lines.
+- **Rotated pages (verified live 2026-11-23): ARSS compensates `/Rotate` itself.** Given displayed
+  coordinates on a `/Rotate 90` page it writes the widget at the rotated rectangle with an upright
+  appearance (`/Matrix [0 1 -1 0 0 0]`). Pre-converting to user space puts the stamp off the page.
+  Send displayed coordinates; add the CropBox offset only on unrotated pages.
+- **ARSS bug: dangling `/Info` after signing.** When the input PDF has an `/Info` dictionary, the
+  incremental update ARSS appends sets `/Info N 0 R` with `/Size N` and never writes object N.
+  Viewers repair it (poppler: "xref num N not found"); the signature stays valid (pyHanko: intact,
+  whole file covered); the document's title/author metadata appears empty. Can't be fixed after
+  signing (it would be a post-signature change). Seen with pypdf-made inputs; to re-check with a
+  real-world PDF.
 - `pkcs7signV2` (`detached=false`, `returnder=true`) → CAdES-BES, content attached, SHA-256 + RSA, signed
   attributes contentType, messageDigest, signingTime, **signingCertificateV2**. `openssl cms -verify -noverify`
   succeeds and extracts the content. The output is **BER (indefinite length, starts `30 80`) despite

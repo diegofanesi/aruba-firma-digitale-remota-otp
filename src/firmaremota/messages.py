@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 
 # argparse (Python 3.12–3.14) marks its own strings with gettext; these are the ones a user can see.
 _ARGPARSE_IT = {
@@ -60,3 +61,47 @@ def signers_line(signers) -> str:
         when = f" ({s.signing_time.astimezone():%d/%m/%Y %H:%M})" if s.signing_time else ""
         parts.append(f"{s.name}{when}")
     return ", ".join(parts) or "nessun firmatario trovato"
+
+
+def _date(value: dt.datetime) -> str:
+    return f"{value.astimezone():%d/%m/%Y}"
+
+
+def check_lines(check) -> list[str]:
+    """Italian description of one SignatureCheck: verdict first, then details and problems."""
+    s = check.signer
+    lines = ["FIRMA VALIDA" if check.ok else "FIRMA NON VALIDA"]
+    who = s.name + (f" (codice fiscale {s.fiscal_code})" if s.fiscal_code else "")
+    lines.append(f"Firmatario: {who}")
+    if s.signing_time:
+        lines.append(f"Firmato il: {s.signing_time.astimezone():%d/%m/%Y alle %H:%M}")
+    lines.append(f"Certificato emesso da {s.issuer}, valido fino al {_date(s.not_after)}")
+    if not check.intact:
+        lines.append("Problema: il documento è stato modificato dopo la firma.")
+    elif not check.valid:
+        lines.append("Problema: la firma non corrisponde al certificato del firmatario.")
+    if check.revoked:
+        lines.append("Problema: il certificato del firmatario è stato revocato.")
+    elif not check.trusted:
+        if s.not_after < dt.datetime.now(dt.timezone.utc):
+            lines.append(f"Problema: il certificato del firmatario è scaduto il {_date(s.not_after)}.")
+        else:
+            lines.append("Problema: il certificato non risulta emesso da un certificatore riconosciuto.")
+    if not check.covers_document:
+        lines.append("Problema: il PDF è stato modificato dopo questa firma in modo non consentito.")
+    if check.trusted and not check.revocation_checked:
+        lines.append("Avviso: non è stato possibile controllare se il certificato è stato revocato (sei offline?).")
+    if check.qualified is True:
+        lines.append("Tipo: firma elettronica qualificata (firma digitale).")
+    elif check.qualified is False:
+        lines.append("Tipo: firma elettronica NON qualificata.")
+    return lines
+
+
+def trust_list_line(report) -> str:
+    if report.trust_list_date is None:
+        return "Elenco ufficiale dei certificatori non disponibile: l'attendibilità non è stata verificata."
+    when = f"{report.trust_list_date.astimezone():%d/%m/%Y}"
+    if report.trust_list_stale:
+        return f"Verifica fatta con l'elenco ufficiale dei certificatori del {when} (non è stato possibile aggiornarlo)."
+    return f"Verifica fatta con l'elenco ufficiale dei certificatori (AgID) aggiornato al {when}."
