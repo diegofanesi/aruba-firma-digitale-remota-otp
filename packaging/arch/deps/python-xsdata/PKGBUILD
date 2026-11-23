@@ -1,0 +1,19 @@
+# Pure-Python library from PyPI, packaged here because it is not in the official
+# Arch repositories. Installed straight from the wheel (no build step).
+pkgname=python-xsdata
+_wheel=xsdata-26.10-py3-none-any.whl
+pkgver=26.10
+pkgrel=1
+pkgdesc="Naive XML & JSON bindings for Python"
+arch=('any')
+url="https://pypi.org/project/xsdata/"
+license=('MIT')
+depends=('python' 'python-typing_extensions')
+makedepends=('python-installer')
+source=("https://files.pythonhosted.org/packages/07/fe/5a9698cef0850317de2a8f3c50519fbaa2cc4225d15bcfe9922e4dff8380/xsdata-26.10-py3-none-any.whl")
+sha256sums=('37a697d60db1396a0431750486744a7e0491fd60669751d95e3ede08f034e0c6')
+noextract=("$_wheel")
+
+package() {
+  python -m installer --destdir="$pkgdir" "$srcdir/$_wheel"
+}

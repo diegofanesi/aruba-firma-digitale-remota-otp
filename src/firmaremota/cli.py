@@ -67,7 +67,7 @@ def _choose_profile(available: list[profiles.Profile], alias: str | None,
 
 def _typed_login() -> tuple[str, str]:
     if not sys.stdin.isatty():
-        raise CredentialsError("Nessun account salvato: esegui 'firma configura'.")
+        raise CredentialsError("Nessun account salvato: esegui 'aruba-firma configura'.")
     raw = input("Nome utente Aruba (utente@dominio): ").strip()
     if not raw:
         raise CredentialsError("Serve il nome utente.")
@@ -78,7 +78,7 @@ def _typed_login() -> tuple[str, str]:
 
 def _typed_password() -> str:
     if not sys.stdin.isatty():
-        raise CredentialsError("La password non è salvata: esegui 'firma configura'.")
+        raise CredentialsError("La password non è salvata: esegui 'aruba-firma configura'.")
     return getpass.getpass("Password Aruba: ")
 
 
@@ -188,7 +188,7 @@ def cmd_verifica(args: argparse.Namespace) -> int:
             print(f"\n--- Firma {index} di {len(report.checks)} ---")
         print("\n".join(messages.check_lines(check)))
     if report.content_name:
-        print(f"\nDocumento contenuto: {report.content_name} (per salvarlo: firma estrai {args.file})")
+        print(f"\nDocumento contenuto: {report.content_name} (per salvarlo: aruba-firma estrai {args.file})")
     print(f"\n{messages.trust_list_line(report)}")
     return EXIT_OK if report.ok else EXIT_ERROR
 
@@ -261,12 +261,12 @@ def cmd_configura(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if not sys.stdin.isatty():
-        raise FirmaError("'firma configura' va eseguito in un terminale.")
+        raise FirmaError("'aruba-firma configura' va eseguito in un terminale.")
     api = make_api()
     if args.salva_password:
         profile = _choose_profile(available, args.account, settings)
         if profile is None:
-            raise CredentialsError("Nessun account salvato: esegui 'firma configura' senza opzioni per aggiungerne uno.")
+            raise CredentialsError("Nessun account salvato: esegui 'aruba-firma configura' senza opzioni per aggiungerne uno.")
         password = _new_password()
         print("Controllo la password con Aruba (non serve il codice OTP)...")
         service.prepare_account(api, profile.user, profile.domain, password)
@@ -312,7 +312,7 @@ def cmd_gui(args: argparse.Namespace) -> int:
         from .gui.app import main as gui_main
     except ImportError as exc:
         raise FirmaError("L'interfaccia grafica non è installata (manca PySide6): "
-                         "reinstalla firma-remota con l'opzione [gui].", detail=str(exc)) from None
+                         "reinstalla aruba-firma con l'opzione [gui].", detail=str(exc)) from None
     return gui_main(args.file)
 
 
@@ -343,10 +343,10 @@ def _add_output_option(parser: argparse.ArgumentParser, default: str) -> None:
 def build_parser() -> argparse.ArgumentParser:
     messages.italian_argparse()
     parser = argparse.ArgumentParser(
-        prog="firma",
+        prog="aruba-firma",
         description="Firma digitale remota Aruba: firma, verifica ed estrai documenti.",
     )
-    parser.add_argument("--version", action="version", version=f"firma-remota {__version__}")
+    parser.add_argument("--version", action="version", version=f"aruba-firma {__version__}")
     parser.add_argument("--debug", action="store_true", help="scrive dettagli tecnici anche sul terminale")
     commands = parser.add_subparsers(dest="comando", title="comandi", metavar="COMANDO")
 

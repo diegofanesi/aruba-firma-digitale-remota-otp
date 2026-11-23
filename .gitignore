@@ -7,3 +7,9 @@ dist/
 spike-output/
 # Documents for manual GUI tests
 prova/
+# makepkg artifacts
+packaging/arch/**/src/
+packaging/arch/**/pkg/
+packaging/arch/**/*.pkg.tar.zst
+packaging/arch/**/*.tar.gz
+packaging/arch/**/*.whl

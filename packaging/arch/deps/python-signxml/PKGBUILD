@@ -1,0 +1,19 @@
+# Pure-Python library from PyPI, packaged here because it is not in the official
+# Arch repositories. Installed straight from the wheel (no build step).
+pkgname=python-signxml
+_wheel=signxml-5.3.1-py3-none-any.whl
+pkgver=5.3.1
+pkgrel=1
+pkgdesc="Python XML Signature and XAdES library"
+arch=('any')
+url="https://pypi.org/project/signxml/"
+license=('Apache-2.0')
+depends=('python' 'python-certifi' 'python-cryptography' 'python-lxml')
+makedepends=('python-installer')
+source=("https://files.pythonhosted.org/packages/03/51/ab6ced08a22acc1e01f8458e7a33367e12dfc62e0b371d2a2a4762d85cf0/signxml-5.3.1-py3-none-any.whl")
+sha256sums=('c45457cd97b3ce52f7342c6f8f049cebe0b8bba69d8fa84da0e7ef5701c9d14f')
+noextract=("$_wheel")
+
+package() {
+  python -m installer --destdir="$pkgdir" "$srcdir/$_wheel"
+}

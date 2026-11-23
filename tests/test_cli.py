@@ -41,7 +41,7 @@ def test_help_is_italian(argv, capsys):
         cli.main(argv)
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert out.startswith("uso: firma")
+    assert out.startswith("uso: aruba-firma")
     assert "opzioni:" in out and "mostra questo aiuto" in out
     for english in ("usage:", "options:", "show this help", "positional arguments"):
         assert english not in out

@@ -39,7 +39,7 @@ def _system() -> list[Line]:
     desktop = os.environ.get("XDG_CURRENT_DESKTOP", "?")
     session = os.environ.get("XDG_SESSION_TYPE", "?")
     return [
-        Line(INFO, "Programma", f"firma-remota {__version__}, Python {platform.python_version()}"),
+        Line(INFO, "Programma", f"aruba-firma {__version__}, Python {platform.python_version()}"),
         Line(INFO, "Sistema", f"{distro}, {libc or 'libc'} {libc_version or '?'}, {platform.machine()}"),
         Line(INFO, "Desktop", f"{desktop} ({session})"),
         Line(INFO, "Librerie", f"zeep {_version('zeep')}, pyHanko {_version('pyhanko')}, "
@@ -57,7 +57,7 @@ def _accounts(store) -> tuple[list[Line], list[profiles.Profile]]:
         return [Line(ERROR, "Portachiavi", exc.message)], []
     if not available:
         return [Line(WARNING, "Account", f"nessuno salvato in {store.name}: verrà chiesto a ogni firma "
-                                         "('firma configura' per salvarlo)")], []
+                                         "('aruba-firma configura' per salvarlo)")], []
     lines = [Line(INFO, "Portachiavi", f"{store.name}, {len(available)} account; sul disco nulla")]
     for p in available:
         detail = "password salvata" if saved[p.id] else "password non salvata: verrà chiesta"

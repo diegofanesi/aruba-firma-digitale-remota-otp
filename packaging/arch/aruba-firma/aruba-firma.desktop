@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Aruba Firma Digitale
+GenericName=Firma digitale
+Comment=Firma e verifica documenti con la firma remota Aruba
+Exec=aruba-firma-gui %F
+Icon=aruba-firma
+Terminal=false
+StartupNotify=true
+StartupWMClass=aruba-firma-gui
+Categories=Office;Utility;
+MimeType=application/pkcs7-mime;application/pdf;
+Keywords=firma;digitale;aruba;pec;p7m;pdf;

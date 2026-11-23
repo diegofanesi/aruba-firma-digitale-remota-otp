@@ -198,6 +198,6 @@ def test_every_help_is_italian(command, capsys):
         cli.main([command, "--help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert out.startswith(f"uso: firma {command}")
+    assert out.startswith(f"uso: aruba-firma {command}")
     for english in ("usage:", "options:", "show this help", "positional arguments", "default:"):
         assert english not in out

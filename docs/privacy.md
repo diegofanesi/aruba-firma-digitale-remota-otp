@@ -19,9 +19,9 @@ Nothing is stored at all: username and password are asked at every signing. A mi
 is then checked by Aruba (`listCert`) and counts as one refused login.
 
 ## Choosing what to remember
-- `firma configura` (or *Impostazioni* in the GUI) adds or edits an account and asks whether to
+- `aruba-firma configura` (or *Impostazioni* in the GUI) adds or edits an account and asks whether to
   remember its password; the account itself (alias and username) is always kept in the wallet.
-- `firma configura --dimentica-password` forgets one password, `--rimuovi` one account,
+- `aruba-firma configura --dimentica-password` forgets one password, `--rimuovi` one account,
   `--dimentica-tutto` every account (all take `--account ALIAS` when there are several).
 - In the GUI, a missing password is asked at the first signature ("Ricorda" is ticked by default)
   and reaches the wallet only after Aruba has accepted it. With no account saved, the first

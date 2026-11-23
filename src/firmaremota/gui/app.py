@@ -1,4 +1,4 @@
-"""Entry point of the graphical interface: `firma-gui [FILE...]` or `firma gui`."""
+"""Entry point of the graphical interface: `aruba-firma-gui [FILE...]` or `aruba-firma gui`."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ from .. import logsetup
 from .main_window import MainWindow
 
 log = logging.getLogger("firmaremota.gui")
-ICON = Path(__file__).with_name("firma-remota.svg")
+ICON = Path(__file__).with_name("aruba-firma.svg")
+DESKTOP_ID = "aruba-firma"  # the installed .desktop file (packaging/arch); used for the icon and the portal
 STYLE = """
 QLabel#title { font-size: 26pt; font-weight: bold; }
 QLabel#subtitle { font-size: 18pt; }
@@ -47,15 +48,24 @@ def _install_excepthook(window: MainWindow) -> None:
 
 def create_app(argv: list[str]) -> QApplication:
     app = QApplication.instance() or QApplication(argv)
-    app.setApplicationName("Firma remota")
-    app.setDesktopFileName("firma-remota")  # Wayland: match the .desktop file (icon, grouping)
+    app.setApplicationName("Aruba Firma Digitale")
+    if _desktop_file_installed():  # otherwise Qt warns that the portal can't find the app id
+        app.setDesktopFileName(DESKTOP_ID)  # Wayland: icon and window grouping come from the .desktop file
     app.setStyle("Fusion")
     font = app.font()
     font.setPointSize(14)
     app.setFont(font)
     app.setStyleSheet(STYLE)
-    app.setWindowIcon(QIcon(str(ICON)))
+    app.setWindowIcon(QIcon.fromTheme(DESKTOP_ID, QIcon(str(ICON))))
     return app
+
+
+def _desktop_file_installed() -> bool:
+    import os
+
+    data_dirs = [os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")]
+    data_dirs += (os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":")
+    return any((Path(d) / "applications" / f"{DESKTOP_ID}.desktop").is_file() for d in data_dirs if d)
 
 
 def main(argv: list[str] | None = None) -> int:

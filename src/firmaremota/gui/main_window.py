@@ -100,7 +100,7 @@ class HomePage(QWidget):
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(48, 20, 48, 16)
-        layout.addWidget(_label("Firma remota", "title"))
+        layout.addWidget(_label("Aruba Firma Digitale", "title"))
         self.bar = ProfileBar()
         layout.addWidget(self.bar)
         layout.addSpacing(6)
@@ -361,7 +361,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.api_factory = api_factory
         self._api = None
-        self.setWindowTitle("Firma remota")
+        self.setWindowTitle("Aruba Firma Digitale")
         self.setMinimumSize(1000, 700)
         self.setAcceptDrops(True)
         self.stack = QStackedWidget()

@@ -1,0 +1,50 @@
+# aruba-firma: Aruba remote digital signature client (CLI + Qt GUI).
+# Built from a tarball of this repository by packaging/arch/build.sh, which also fills in pkgver.
+pkgname=aruba-firma
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Firma digitale remota Aruba: firma, verifica ed estrai documenti (riga di comando e interfaccia grafica)"
+arch=('any')
+license=('MIT')
+depends=(
+  'python'
+  'python-zeep'            # SOAP client for Aruba's ARSS service
+  'python-keyring'         # Secret Service (GNOME Keyring, KeePassXC...) password store
+  'python-jeepney'         # KWallet over D-Bus
+  'python-asn1crypto'      # reading .p7m envelopes and certificates
+  'python-pypdf'           # PDF page geometry for the visible stamp
+  'python-pyhanko'         # local signature verification (packaging/arch/deps)
+  'python-pyhanko-certvalidator'
+  'python-requests'
+  'python-lxml'
+  'pyside6'                # the graphical interface
+  'hicolor-icon-theme'
+)
+optdepends=(
+  'kwallet: per ricordare nome utente e password su KDE Plasma'
+  'gnome-keyring: per ricordare nome utente e password su GNOME'
+)
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-hatchling')
+checkdepends=('python-pytest' 'python-pytest-qt' 'python-cryptography')
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')  # the tarball is produced locally from git by build.sh
+
+build() {
+  cd "$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  # Offline tests only (the live test needs an OTP). The GUI tests run on Qt's offscreen platform.
+  PYTHONPATH="$PWD/src" QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider -m "not live"
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 packaging/arch/aruba-firma/aruba-firma.desktop -t "$pkgdir/usr/share/applications"
+  install -Dm644 src/firmaremota/gui/aruba-firma.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/aruba-firma.svg"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
+  install -Dm644 README.md docs/privacy.md -t "$pkgdir/usr/share/doc/$pkgname"
+}

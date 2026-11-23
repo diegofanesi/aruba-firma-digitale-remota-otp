@@ -1,5 +1,5 @@
 [project]
-name = "firma-remota"
+name = "aruba-firma"
 version = "0.1.0"
 description = "Client per la firma digitale remota Aruba (ARSS): riga di comando e interfaccia grafica"
 requires-python = ">=3.12,<3.15"
@@ -12,10 +12,10 @@ dependencies = [
 ]
 
 [project.scripts]
-firma = "firmaremota.cli:main"
+aruba-firma = "firmaremota.cli:main"
 
 [project.gui-scripts]
-firma-gui = "firmaremota.gui.app:main"
+aruba-firma-gui = "firmaremota.gui.app:main"
 
 [project.optional-dependencies]
 gui = ["PySide6-Essentials>=6.9,<6.13"]

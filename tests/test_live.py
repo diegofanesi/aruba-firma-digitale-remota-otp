@@ -36,7 +36,7 @@ def test_one_session_signs_and_verifies_everything(real_wallet, tmp_path, make_p
     store = credentials.get_store()
     available = profiles.load_all(store) if store else []
     profile = next((p for p in available if profiles.password(store, p)), None)
-    assert profile, "no account with a saved password in the wallet: run 'firma configura' first"
+    assert profile, "no account with a saved password in the wallet: run 'aruba-firma configura' first"
     api = ArssClient()
     account, signer = service.prepare_account(api, profile.user, profile.domain, profiles.password(store, profile),
                                               config.load(REAL_CONFIG))
