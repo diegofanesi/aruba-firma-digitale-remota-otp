@@ -23,11 +23,14 @@ class Line:
     text: str
 
 
-def _version(package: str) -> str:
-    try:
-        return metadata.version(package)
-    except metadata.PackageNotFoundError:
-        return "non installato"
+def _version(*names: str) -> str:
+    """Version of the first of these distributions that is installed (a library can go by several names)."""
+    for name in names:
+        try:
+            return metadata.version(name)
+        except metadata.PackageNotFoundError:
+            continue
+    return "non installato"
 
 
 def _system() -> list[Line]:
@@ -43,7 +46,7 @@ def _system() -> list[Line]:
         Line(INFO, "Sistema", f"{distro}, {libc or 'libc'} {libc_version or '?'}, {platform.machine()}"),
         Line(INFO, "Desktop", f"{desktop} ({session})"),
         Line(INFO, "Librerie", f"zeep {_version('zeep')}, pyHanko {_version('pyhanko')}, "
-                               f"PySide6 {_version('PySide6-Essentials')}"),
+                               f"PySide6 {_version('PySide6-Essentials', 'PySide6')}"),
     ]
 
 
