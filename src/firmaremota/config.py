@@ -37,6 +37,7 @@ class Settings:
     cert_id: str = "AS0"
     type_hsm: str = "COSIGN"
     signer_name: str = ""  # certificate holder, written in the visible stamp
+    cert_expires: str = ""  # ISO date, for expiry warnings
 
     @property
     def complete(self) -> bool:

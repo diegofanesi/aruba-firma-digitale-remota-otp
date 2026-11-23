@@ -11,7 +11,7 @@ from . import config, files, p7m, stamp
 from .arss.client import ArssApi
 from .errors import CredentialsError, FileError, FirmaError, OtpError, ServiceError
 from .logsetup import register_secret
-from .models import Account, AuthCtx, JobResult, Kind, SignJob
+from .models import Account, AuthCtx, JobResult, Kind, SignerInfo, SignJob
 
 log = logging.getLogger("firmaremota.service")
 
@@ -78,16 +78,21 @@ def _record_auth(success: bool) -> None:
     config.save_state(state)
 
 
-def fetch_signer_name(api: ArssApi, account: Account, password: str) -> str | None:
-    """Certificate holder's name, for the visible stamp. Needs the password only, no OTP.
+def check_credentials(api: ArssApi, account: Account, password: str) -> list[tuple[str, SignerInfo]]:
+    """Ask Aruba to accept the password (no OTP); returns (certID, holder) for each certificate.
 
     A refusal counts as a failed login; a success doesn't reset the counter (the OTP is untested).
     """
     try:
-        certs = api.list_certs(account, password)
+        return api.list_certs(account, password)
     except CredentialsError:
         _record_auth(False)
         raise
+
+
+def fetch_signer_name(api: ArssApi, account: Account, password: str) -> str | None:
+    """Certificate holder's name, for the visible stamp."""
+    certs = check_credentials(api, account, password)
     for cert_id, signer in certs:
         if cert_id == account.cert_id:
             return signer.name

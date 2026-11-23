@@ -43,10 +43,14 @@ def _private_file(path: Path) -> None:
     os.chmod(path, 0o600)
 
 
+def log_path() -> Path:
+    return state_dir() / "firma.log"
+
+
 def setup(debug: bool = False, console: bool = False, directory: Path | None = None) -> Path:
     """Configure the 'firmaremota' logger; returns the log file path."""
-    directory = directory or state_dir()
-    log_file = directory / "firma.log"
+    log_file = directory / "firma.log" if directory else log_path()
+    directory = log_file.parent
     _private_file(log_file)
     formatter = RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 

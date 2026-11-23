@@ -127,6 +127,12 @@ def _load_cached() -> tuple[dict[str, str], dt.datetime] | None:
         return None
 
 
+def cached_date() -> dt.datetime | None:
+    """When the cached lists were downloaded, or None. Doesn't touch the network."""
+    cached = _load_cached()
+    return cached[1] if cached else None
+
+
 def load(allow_network: bool = True, session: requests.Session | None = None) -> TrustList:
     now = dt.datetime.now(dt.timezone.utc)
     cached = _load_cached()

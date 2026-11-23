@@ -9,9 +9,9 @@ import re
 import sys
 from pathlib import Path
 
-from . import __version__, config, credentials, files, logsetup, messages, p7m, service, verify
+from . import __version__, config, credentials, diagnostics, files, logsetup, messages, p7m, service, verify
 from .errors import CredentialsError, FirmaError, OtpError
-from .models import LAST_PAGE, Kind, Position, SignJob, StampSpec
+from .models import LAST_PAGE, Account, Kind, Position, SignJob, StampSpec
 
 log = logging.getLogger("firmaremota.cli")
 
@@ -140,6 +140,113 @@ def cmd_verifica(args: argparse.Namespace) -> int:
     return EXIT_OK if report.ok else EXIT_ERROR
 
 
+def _yes(question: str, default: bool = True) -> bool:
+    answer = input(f"{question} [{'S/n' if default else 's/N'}] ").strip().lower()
+    return default if not answer else answer in ("s", "si", "sì", "y", "yes")
+
+
+def _new_password() -> str:
+    password = getpass.getpass("Password Aruba: ")
+    if not password:
+        raise CredentialsError("La password non può essere vuota.")
+    if getpass.getpass("Ripeti la password: ") != password:
+        raise CredentialsError("Le due password non coincidono: nulla è stato salvato.")
+    return password
+
+
+def _ask_account(settings: config.Settings) -> tuple[str, str]:
+    """Username and domain; 'utente@dominio' (as Aruba's selfcare shows it) is accepted in one go."""
+    raw = input(f"Nome utente Aruba [{settings.user}]: ").strip() or settings.user
+    if "@" in raw:
+        user, domain = (part.strip() for part in raw.split("@", 1))
+        print(f"Dominio di firma: {domain}")
+    else:
+        user = raw
+        default = settings.domain or "firma"
+        domain = input(f"Dominio di firma (di solito 'firma') [{default}]: ").strip() or default
+    if not (user and domain):
+        raise CredentialsError("Nome utente e dominio sono obbligatori.")
+    return user, domain
+
+
+def _choose_certificate(certs):
+    if not certs:
+        raise CredentialsError("Aruba non ha trovato certificati di firma per questo account.")
+    if len(certs) == 1:
+        return certs[0]
+    print("Questo account ha più certificati:")
+    for number, (_, signer) in enumerate(certs, start=1):
+        print(f"  {number}. {signer.name}, valido fino al {signer.not_after.astimezone():%d/%m/%Y}")
+    choice = input(f"Quale usare? [1-{len(certs)}] ").strip() or "1"
+    if not choice.isdigit() or not 1 <= int(choice) <= len(certs):
+        raise FirmaError("Scelta non valida: nulla è stato salvato.")
+    return certs[int(choice) - 1]
+
+
+def _save_password(store, key: str, password: str) -> None:
+    store.set(key, password)
+    if store.get(key) != password:
+        raise credentials.CredentialStoreError("Il portachiavi non ha restituito la password appena salvata.")
+
+
+def cmd_configura(args: argparse.Namespace) -> int:
+    settings = config.load()
+    store = credentials.get_store()
+    if args.dimentica_password:
+        if settings.complete and store:
+            store.delete(credentials.account_key(settings.user, settings.domain))
+            print(f"Password rimossa da {store.name}.")
+        else:
+            print("Non c'era nessuna password salvata.")
+        return EXIT_OK
+    if not sys.stdin.isatty():
+        raise FirmaError("'firma configura' va eseguito in un terminale.")
+    api = make_api()
+
+    if args.salva_password:
+        account = service.account_from(settings)
+        if store is None:
+            raise FirmaError("Nessun portachiavi disponibile su questo computer.")
+        password = _new_password()
+        print("Controllo la password con Aruba (non serve il codice OTP)...")
+        service.check_credentials(api, account, password)
+        _save_password(store, credentials.account_key(settings.user, settings.domain), password)
+        print(f"Password salvata in {store.name}.")
+        return EXIT_OK
+
+    print("Configurazione della firma remota Aruba.\n")
+    user, domain = _ask_account(settings)
+    save = store is not None and _yes(f"Salvare la password in {store.name}?")
+    password = _new_password() if save else getpass.getpass("Password Aruba: ")
+    print("Controllo le credenziali con Aruba (non serve il codice OTP)...")
+    certs = service.check_credentials(api, Account(user, domain, cert_id=""), password)
+    cert_id, signer = _choose_certificate(certs)
+
+    old_key = credentials.account_key(settings.user, settings.domain) if settings.complete else None
+    new_key = credentials.account_key(user, domain)
+    if save:
+        _save_password(store, new_key, password)
+        if old_key and old_key != new_key:
+            store.delete(old_key)
+    settings.user, settings.domain, settings.cert_id = user, domain, cert_id
+    settings.signer_name = signer.name
+    settings.cert_expires = signer.not_after.date().isoformat()
+    path = config.save(settings)
+
+    print(f"\nFatto. Certificato di {signer.name}, valido fino al {signer.not_after.astimezone():%d/%m/%Y}.")
+    print(f"Impostazioni salvate in {path}.")
+    print(f"Password salvata in {store.name}." if save else "La password verrà chiesta a ogni firma.")
+    return EXIT_OK
+
+
+def cmd_diagnostica(args: argparse.Namespace) -> int:
+    settings = config.load()
+    password = _password(settings) if args.account and settings.complete else None
+    lines = diagnostics.report(make_api(), password)
+    print(diagnostics.as_text(lines))
+    return EXIT_ERROR if diagnostics.has_errors(lines) else EXIT_OK
+
+
 def cmd_estrai(args: argparse.Namespace) -> int:
     src = Path(args.file)
     data = _read(src)
@@ -209,6 +316,25 @@ def build_parser() -> argparse.ArgumentParser:
     estrai.add_argument("file", metavar="FILE", help="il file .p7m")
     _add_output_option(estrai, "accanto al .p7m")
     estrai.set_defaults(handler=cmd_estrai)
+
+    configura = commands.add_parser(
+        "configura", help="imposta account Aruba, dominio e password",
+        description="Imposta nome utente, dominio di firma e password; controlla le credenziali con Aruba "
+                    "(senza codice OTP) e sceglie il certificato di firma.",
+    )
+    only = configura.add_mutually_exclusive_group()
+    only.add_argument("--salva-password", action="store_true", help="salva (o cambia) solo la password")
+    only.add_argument("--dimentica-password", action="store_true", help="cancella la password dal portachiavi")
+    configura.set_defaults(handler=cmd_configura)
+
+    diagnostica = commands.add_parser(
+        "diagnostica", help="controlla che tutto funzioni (utile per l'assistenza)",
+        description="Controlla configurazione, portachiavi, collegamento ad Aruba e scadenza del certificato. "
+                    "Non mostra mai la password.",
+    )
+    diagnostica.add_argument("--account", action="store_true",
+                             help="chiede anche ad Aruba di controllare le credenziali (senza codice OTP)")
+    diagnostica.set_defaults(handler=cmd_diagnostica)
     return parser
 
 
