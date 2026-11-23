@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# Builds the Arch packages: first the five Python libraries that are not in the official
-# repositories (packaging/arch/deps), then aruba-firma itself. Every package is installed right
-# after it is built, because the next ones depend on it; that is the only reason sudo is used.
-# All the packages end up in dist/arch/, ready for `sudo pacman -U dist/arch/*.pkg.tar.zst`
-# on another Arch machine.
+# Builds the Arch package (one file: dist/arch/aruba-firma-<version>-<rel>-any.pkg.tar.zst) and
+# installs it. makepkg downloads the five bundled Python libraries from PyPI (checksums pinned in
+# the PKGBUILD) and pacman installs the official dependencies; sudo is used only for pacman.
 #
-#   packaging/arch/build.sh               build and install everything (asks for sudo)
-#   packaging/arch/build.sh --no-install  only check that the packages build (skips tests and
+#   packaging/arch/build.sh               build, run the tests, install (asks for sudo)
+#   packaging/arch/build.sh --no-install  only check that the package builds (no tests, no
 #                                         dependency checks; nothing is installed)
 #
-# The aruba-firma tarball comes from `git archive HEAD`: commit before building.
+# The tarball comes from `git archive HEAD`: commit before building.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -24,33 +22,19 @@ if [[ "${1:-}" == "--no-install" ]]; then
   flags=(-fd --nocheck)             # -d: don't require the dependencies to be installed
 fi
 
-build_one() {
-  # build_one DIR [pacman -U options...]; the libraries pass --needed (same version: skip),
-  # aruba-firma doesn't, so a rebuild with the same version is reinstalled.
-  local dir=$1 pkg
-  shift
-  (cd "$dir" && makepkg "${flags[@]}")
-  pkg=$(ls -t "$dir"/*.pkg.tar.zst | head -1)
-  cp "$pkg" "$out/"
-  if (( install )); then
-    sudo pacman -U --noconfirm "$@" "$pkg"
-  fi
-}
-
-# The libraries are installed as dependencies: `pacman -Rs aruba-firma` removes them too.
-for dep in python-uritools python-signxml python-xsdata python-pyhanko-certvalidator python-pyhanko; do
-  build_one "$here/deps/$dep" --asdeps --needed
-done
-
 version=$(python3 -c "import tomllib; print(tomllib.load(open('$root/pyproject.toml', 'rb'))['project']['version'])")
 sed -i "s/^pkgver=.*/pkgver=$version/" "$here/aruba-firma/PKGBUILD"
 git -C "$root" archive --format=tar.gz --prefix="aruba-firma-$version/" \
   -o "$here/aruba-firma/aruba-firma-$version.tar.gz" HEAD
-build_one "$here/aruba-firma"
+
+(cd "$here/aruba-firma" && makepkg "${flags[@]}")
+pkg=$(ls -t "$here/aruba-firma"/*.pkg.tar.zst | head -1)
+rm -f "$out"/*.pkg.tar.zst           # dist/arch holds only the current package
+cp "$pkg" "$out/"
+if (( install )); then
+  sudo pacman -U --noconfirm "$pkg"  # no --needed: a rebuild with the same version is reinstalled
+fi
 
 echo
-echo "Pacchetti pronti in $out:"
-ls -1 "$out"
-echo
-echo "Su un altro computer Arch:"
-echo "  sudo pacman -U --asdeps $(basename "$out")/python-*.pkg.tar.zst && sudo pacman -U $(basename "$out")/aruba-firma-*.pkg.tar.zst"
+echo "Pacchetto pronto: $out/$(basename "$pkg")"
+echo "Su un altro computer Arch:  sudo pacman -U $(basename "$pkg")"

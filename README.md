@@ -15,14 +15,15 @@ resta sui server Aruba e ogni firma è autorizzata con nome utente, password e c
 
 ## Installazione su Arch Linux
 
-I pacchetti si costruiscono una volta con `packaging/arch/build.sh` (vedi sotto) e si installano
-con pacman; le dipendenze sono pacchetti ufficiali più cinque librerie Python incluse in
-`dist/arch/`:
+Un solo pacchetto, costruito una volta con `packaging/arch/build.sh` (vedi sotto):
 
 ```bash
-sudo pacman -U --asdeps dist/arch/python-*.pkg.tar.zst   # le librerie, come dipendenze
-sudo pacman -U dist/arch/aruba-firma-*.pkg.tar.zst       # il programma
+sudo pacman -U aruba-firma-0.1.0-1-any.pkg.tar.zst
 ```
+
+Le dipendenze sono pacchetti ufficiali che pacman installa da sé; le poche librerie Python che
+mancano nei repository (pyHanko e le sue, usate per verificare le firme) sono incluse nel
+pacchetto in `/usr/lib/aruba-firma/vendor` e vengono usate solo se non ce n'è una copia di sistema.
 
 Si ottengono i comandi `aruba-firma` e `aruba-firma-gui` e la voce **Aruba Firma Digitale**
 nel menu delle applicazioni. Su KDE Plasma nome utente e password vengono ricordati in KWallet.
@@ -59,11 +60,12 @@ uv run aruba-firma --help
 uv run aruba-firma-gui
 ```
 
-Per costruire i pacchetti Arch (chiede sudo per installare le librerie man mano che le crea):
+Per costruire il pacchetto Arch (makepkg scarica le librerie incluse da PyPI con checksum
+fissati; sudo serve solo a pacman per installare):
 
 ```bash
 git commit -am "..."        # build.sh impacchetta HEAD
-packaging/arch/build.sh     # risultato in dist/arch/
+packaging/arch/build.sh     # risultato in dist/arch/, poi installato
 ```
 
 Note tecniche sul servizio Aruba in `docs/arss-notes.md`; cosa viene salvato e dove in

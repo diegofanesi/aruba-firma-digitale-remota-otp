@@ -1,4 +1,4 @@
-# aruba-firma: Aruba remote digital signature client (CLI + Qt GUI).
+# aruba-firma: Aruba remote digital signature client (CLI + Qt GUI), one self-contained package.
 # Built from a tarball of this repository by packaging/arch/build.sh, which also fills in pkgver.
 pkgname=aruba-firma
 pkgver=0.1.0
@@ -13,36 +13,74 @@ depends=(
   'python-jeepney'         # KWallet over D-Bus
   'python-asn1crypto'      # reading .p7m envelopes and certificates
   'python-pypdf'           # PDF page geometry for the visible stamp
-  'python-pyhanko'         # local signature verification (packaging/arch/deps)
-  'python-pyhanko-certvalidator'
   'python-requests'
   'python-lxml'
   'pyside6'                # the graphical interface
   'hicolor-icon-theme'
+  # needed by the bundled libraries below
+  'python-cryptography'
+  'python-oscrypto'
+  'python-aiohttp'
+  'python-certifi'
+  'python-tzlocal'
+  'python-typing_extensions'
 )
 optdepends=(
   'kwallet: per ricordare nome utente e password su KDE Plasma'
   'gnome-keyring: per ricordare nome utente e password su GNOME'
 )
 makedepends=('python-build' 'python-installer' 'python-wheel' 'python-hatchling')
-checkdepends=('python-pytest' 'python-pytest-qt' 'python-cryptography')
-source=("$pkgname-$pkgver.tar.gz")
-sha256sums=('SKIP')  # the tarball is produced locally from git by build.sh
+checkdepends=('python-pytest' 'python-pytest-qt')
+
+# Pure-Python libraries for local signature verification (pyHanko and its helpers) that are not
+# in the official repositories. They are shipped inside this package, unpacked from the pinned
+# PyPI wheels into /usr/lib/aruba-firma/vendor, which the app adds to its import path only after
+# the system path: a copy installed system-wide always takes precedence (src/firmaremota/__init__.py).
+_vendored=(
+  uritools-7.0.1-py3-none-any.whl
+  signxml-5.3.1-py3-none-any.whl
+  xsdata-26.10-py3-none-any.whl
+  pyhanko_certvalidator-0.33.0-py3-none-any.whl
+  pyhanko-0.38.2-py3-none-any.whl
+)
+source=("$pkgname-$pkgver.tar.gz"
+        "https://files.pythonhosted.org/packages/a0/20/075b0b5bed54848fd685b1354fe130983ed3b3b008c6818c8b1ef135181e/uritools-7.0.1-py3-none-any.whl"
+        "https://files.pythonhosted.org/packages/03/51/ab6ced08a22acc1e01f8458e7a33367e12dfc62e0b371d2a2a4762d85cf0/signxml-5.3.1-py3-none-any.whl"
+        "https://files.pythonhosted.org/packages/07/fe/5a9698cef0850317de2a8f3c50519fbaa2cc4225d15bcfe9922e4dff8380/xsdata-26.10-py3-none-any.whl"
+        "https://files.pythonhosted.org/packages/e8/22/fc8a485269187b85eadd2cf536b92be403a238932e7d3943ba176fb31041/pyhanko_certvalidator-0.33.0-py3-none-any.whl"
+        "https://files.pythonhosted.org/packages/7b/7f/01b57148a40097e5845bf71d46297295391fe19c7a4a5b1382eaa5eeba1f/pyhanko-0.38.2-py3-none-any.whl")
+sha256sums=('SKIP'  # the tarball is produced locally from git by build.sh
+            '68ef533cebb6b5b6a79cc94c9e8c06d7521e3fe60a11f6689ec51795f25b4617'
+            'c45457cd97b3ce52f7342c6f8f049cebe0b8bba69d8fa84da0e7ef5701c9d14f'
+            '37a697d60db1396a0431750486744a7e0491fd60669751d95e3ede08f034e0c6'
+            '72d3b830c0427a7aae45873ba7b4e34cb86caed451eff9dfb4394a69e93bb169'
+            '041051105ddf3ace6571605ddccae0f3e444a6e99f0bd54ec88281684282ad41')
+noextract=("${_vendored[@]}")
 
 build() {
   cd "$pkgname-$pkgver"
   python -m build --wheel --no-isolation
+  rm -rf "$srcdir/vendor"
+  mkdir -p "$srcdir/vendor"
+  local wheel
+  for wheel in "${_vendored[@]}"; do
+    bsdtar -xf "$srcdir/$wheel" -C "$srcdir/vendor"
+  done
 }
 
 check() {
   cd "$pkgname-$pkgver"
   # Offline tests only (the live test needs an OTP). The GUI tests run on Qt's offscreen platform.
-  PYTHONPATH="$PWD/src" QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider -m "not live"
+  PYTHONPATH="$PWD/src:$srcdir/vendor" QT_QPA_PLATFORM=offscreen \
+    python -m pytest -q -p no:cacheprovider -m "not live"
 }
 
 package() {
   cd "$pkgname-$pkgver"
   python -m installer --destdir="$pkgdir" dist/*.whl
+  install -d "$pkgdir/usr/lib/$pkgname"
+  cp -r "$srcdir/vendor" "$pkgdir/usr/lib/$pkgname/vendor"
+  python -m compileall -q -d "/usr/lib/$pkgname/vendor" "$pkgdir/usr/lib/$pkgname/vendor"
   install -Dm644 packaging/arch/aruba-firma/aruba-firma.desktop -t "$pkgdir/usr/share/applications"
   install -Dm644 src/firmaremota/gui/aruba-firma.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/aruba-firma.svg"
   install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
