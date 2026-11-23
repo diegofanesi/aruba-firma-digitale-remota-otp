@@ -17,7 +17,7 @@ from .models import LAST_PAGE, Kind, Position, SignerInfo, SignJob, StampSpec
 log = logging.getLogger("firmaremota.cli")
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_PARTIAL = 0, 1, 2, 4
-_OTP = re.compile(r"\d{6,8}")
+_OTP = re.compile(r"[0-9]{6,8}")  # ASCII digits only: \d would also accept e.g. Arabic-Indic numerals
 
 
 def make_api():
@@ -381,3 +381,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nInterrotto.", file=sys.stderr)
         return 130
+    except EOFError:  # stdin closed while a question was being asked
+        print("\nInput terminato: operazione annullata.", file=sys.stderr)
+        return EXIT_ERROR
+    except Exception:
+        log.exception("errore imprevisto")
+        print(f"Errore imprevisto. I dettagli sono nel registro: {logsetup.log_path()}", file=sys.stderr)
+        return EXIT_ERROR

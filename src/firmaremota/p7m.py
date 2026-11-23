@@ -118,14 +118,22 @@ def signing_time(si: cms.SignerInfo):
     return None
 
 
+def _attribute(name: x509.Name, key: str) -> str | None:
+    """One value of a name attribute; asn1crypto gives a list when the attribute appears twice."""
+    value = name.native.get(key)
+    if isinstance(value, list):
+        value = value[0] if value else None
+    return str(value) if value else None
+
+
 def signer_from_cert(cert: x509.Certificate, signed_at=None) -> SignerInfo:
-    subject = cert.subject.native
-    name = subject.get("common_name") or " ".join(
-        p for p in (subject.get("given_name"), subject.get("surname")) if p
-    ) or cert.subject.human_friendly
-    serial = subject.get("serial_number")  # Italian certificates: "TINIT-<codice fiscale>"
+    subject = cert.subject
+    name = _attribute(subject, "common_name") or " ".join(
+        p for p in (_attribute(subject, "given_name"), _attribute(subject, "surname")) if p
+    ) or subject.human_friendly
+    serial = _attribute(subject, "serial_number")  # Italian certificates: "TINIT-<codice fiscale>"
     fiscal_code = serial.split("-", 1)[1] if serial and serial.upper().startswith("TINIT-") else None
-    issuer = cert.issuer.native.get("common_name") or cert.issuer.human_friendly
+    issuer = _attribute(cert.issuer, "common_name") or cert.issuer.human_friendly
     validity = cert["tbs_certificate"]["validity"]
     exts = cert["tbs_certificate"]["extensions"]
     qualified = isinstance(exts, x509.Extensions) and any(e["extn_id"].dotted == _QC_STATEMENTS for e in exts)

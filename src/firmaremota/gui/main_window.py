@@ -417,6 +417,17 @@ class MainWindow(QMainWindow):
         except credentials.CredentialStoreError as exc:
             log.info("portachiavi non disponibile all'avvio: %s", exc.message)
 
+    def busy(self) -> bool:
+        return any(not thread.isFinished() for thread, _ in self.__dict__.get("_running_workers", []))
+
+    def closeEvent(self, event) -> None:
+        """A running worker thread must not be destroyed with the window (Qt would abort)."""
+        if self.busy():
+            self.progress.current.setText("Attendi la fine dell'operazione in corso prima di chiudere.")
+            event.ignore()
+            return
+        event.accept()
+
     def dragEnterEvent(self, event) -> None:
         if self.stack.currentWidget() is self.home and event.mimeData().hasUrls():
             event.acceptProposedAction()
@@ -511,8 +522,10 @@ class MainWindow(QMainWindow):
         pending, self.pending = self.pending, None
         if pending["remember"]:  # Aruba has just accepted them: now they may go into the wallet
             try:
-                credentials.save_account(credentials.get_store(), pending["user"], pending["domain"], pending["password"])
-                self.login = (pending["user"], pending["domain"])
+                store = credentials.get_store()
+                if store is not None:
+                    credentials.save_account(store, pending["user"], pending["domain"], pending["password"])
+                    self.login = (pending["user"], pending["domain"])
             except credentials.CredentialStoreError as exc:
                 log.warning("credenziali non salvate: %s", exc.message)
         note = ""

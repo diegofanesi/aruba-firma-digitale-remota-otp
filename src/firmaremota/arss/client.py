@@ -85,7 +85,7 @@ class ArssClient:
         log.debug("ARSS %s", operation)
         try:
             return getattr(self._client.service, operation)(**kwargs)
-        except (requests.ConnectionError, requests.Timeout) as exc:
+        except requests.RequestException as exc:  # connection, timeout, TLS, broken transfer...
             raise NetworkError(MSG_NETWORK, detail=str(exc)) from None
         except Fault as exc:
             raise map_error(None, exc.message) from None
@@ -129,8 +129,12 @@ class ArssClient:
         certs = []
         for group in ("app1", "app2"):
             for cert in getattr(response, group, None) or []:
-                if cert is not None and cert.id and cert.value:
+                if cert is None or not (cert.id and cert.value):
+                    continue
+                try:
                     certs.append((cert.id, p7m.signer_from_cert(x509.Certificate.load(cert.value))))
+                except Exception as exc:  # a certificate Aruba sent that we can't read: skip it
+                    log.warning("certificato non leggibile da listCert: %s", exc)
         return certs
 
     def open_session(self, auth: AuthCtx) -> str:

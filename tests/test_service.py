@@ -80,7 +80,7 @@ def test_refused_otp_counts_and_signs_nothing(docs):
             service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs))
         assert service.auth_failures() == expected
     assert set(api.names()) == {"open_session"}
-    service.sign_batch(FakeArss(make_p7m=lambda d: d), ACCOUNT, "pw", OTP, [])
+    service.sign_batch(FakeArss(make_p7m=lambda d: d), ACCOUNT, "pw", OTP, jobs(docs)[:1])  # one accepted OTP
     assert service.auth_failures() == 0
 
 

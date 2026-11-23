@@ -47,10 +47,9 @@ def _system() -> list[Line]:
     ]
 
 
-def _account() -> tuple[list[Line], tuple[str, str] | None]:
+def _account(store) -> tuple[list[Line], tuple[str, str] | None]:
     try:
-        store = credentials.get_store()
-        login = credentials.stored_login()
+        login = credentials.stored_login(store)
     except credentials.CredentialStoreError as exc:
         return [Line(ERROR, "Portachiavi", exc.message)], None
     if store is None:
@@ -61,9 +60,8 @@ def _account() -> tuple[list[Line], tuple[str, str] | None]:
     return [Line(OK, "Account", f"{logsetup.partial(user)}@{domain} (nel portachiavi; sul disco nulla)")], login
 
 
-def _password() -> list[Line]:
+def _password(store) -> list[Line]:
     try:
-        store = credentials.get_store()
         if store is None:
             return [Line(WARNING, "Password", "nessun portachiavi disponibile: verrà chiesta ogni volta")]
         saved = store.get(credentials.PASSWORD_KEY) is not None
@@ -115,8 +113,9 @@ def _certificate(api, login: tuple[str, str], password: str) -> list[Line]:
 
 def report(api, password: str | None = None, check_account: bool = False) -> list[Line]:
     """All local checks; with `check_account` and a password it also asks Aruba (no OTP)."""
-    account_lines, login = _account()
-    lines = _system() + account_lines + _password() + _failures() + _service(api) + _trust_list()
+    store = credentials.get_store()
+    account_lines, login = _account(store)
+    lines = _system() + account_lines + _password(store) + _failures() + _service(api) + _trust_list()
     if check_account and login and password:
         lines += _certificate(api, login, password)
     lines.append(Line(INFO, "Registro", str(logsetup.log_path())))

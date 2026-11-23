@@ -57,9 +57,11 @@ def register_paths(*paths) -> None:
         path = Path(path)
         for candidate in (path, path.resolve()):
             text = str(candidate)
-            if len(candidate.name) >= _MIN_PERSONAL and _replacements.get(text) != MASK:
-                _replacements[text] = f"…/{mask_file_name(candidate.name)}"
-                _replacements.setdefault(candidate.name, mask_file_name(candidate.name))
+            if len(candidate.name) < _MIN_PERSONAL or _replacements.get(text) == MASK:
+                continue
+            masked = mask_file_name(candidate.name)
+            _replacements[text] = masked if text == candidate.name else f"…/{masked}"
+            _replacements.setdefault(candidate.name, masked)
 
 
 def redact(text: str) -> str:

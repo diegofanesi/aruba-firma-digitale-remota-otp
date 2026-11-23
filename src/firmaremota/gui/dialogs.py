@@ -65,7 +65,7 @@ class OtpDialog(QDialog):
 
     def _clean(self, text: str) -> None:
         # Keep digits only, at most 8. No setMaxLength: it would cut a pasted "1234 5678" before cleaning.
-        digits = re.sub(r"\D", "", text)[:8]
+        digits = re.sub(r"[^0-9]", "", text)[:8]  # ASCII digits only
         if digits != text:
             self.code.setText(digits)
         self._update()

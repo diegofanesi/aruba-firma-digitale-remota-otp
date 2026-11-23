@@ -34,7 +34,7 @@ def test_write_new_never_overwrites(tmp_path):
     third = files.write_new(tmp_path, "Perché è così.pdf", b"tre")
     assert [p.name for p in (first, second, third)] == ["Perché è così.pdf", "Perché è così (2).pdf", "Perché è così (3).pdf"]
     assert [p.read_bytes() for p in (first, second, third)] == [b"uno", b"due", b"tre"]
-    assert stat.S_IMODE(first.stat().st_mode) == 0o644
+    assert stat.S_IMODE(first.stat().st_mode) == files._FILE_MODE  # what the user's umask gives a normal save
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted(p.name for p in (first, second, third))
 
 

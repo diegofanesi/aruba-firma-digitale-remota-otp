@@ -157,6 +157,8 @@ def sign_batch(
     a local problem with one file skips just that file; any error from the service stops the
     batch and the remaining files are reported as not signed.
     """
+    if not jobs:
+        return []  # never spend an OTP on nothing
     register_secret(password, otp)
     register_paths(*(job.src for job in jobs), *(output_dir(job, out_dir) for job in jobs))
     try:

@@ -93,7 +93,21 @@ def default_trust() -> Trust:
 
 
 def _with_revocation_fallback(validate, trust: Trust):
-    """Run `validate(context)` strictly, then leniently if only the revocation fetch failed."""
+    """Run `validate(context)` strictly, then leniently if only the revocation fetch failed.
+
+    pyHanko reports untrusted chains and failed fetches in the status; an exception means the
+    signature itself can't be read (unsupported format, signer certificate missing...).
+    """
+    try:
+        return _validate_twice(validate, trust)
+    except FileError:
+        raise
+    except Exception as exc:
+        raise FileError("La firma non è leggibile: il file è danneggiato o usa un formato non supportato.",
+                        detail=f"{type(exc).__name__}: {exc}") from None
+
+
+def _validate_twice(validate, trust: Trust):
     status = validate(trust.context(strict_revocation=True))
     if status.trusted or not status.intact or not status.valid:
         return status, True

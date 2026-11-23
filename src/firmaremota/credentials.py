@@ -7,7 +7,10 @@ user every time. The OTP is never stored.
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from typing import Protocol
+
+from .errors import FirmaError
 
 APP_ID = "firma-remota"
 SERVICE = "firma-remota"  # Secret Service "service" / KWallet folder
@@ -26,7 +29,7 @@ def split_login(login: str) -> tuple[str, str]:
     return user.strip(), domain.strip() or "firma"
 
 
-class CredentialStoreError(Exception):
+class CredentialStoreError(FirmaError):
     """The password store exists but the operation failed (denied, locked, D-Bus error)."""
 
 
@@ -40,21 +43,37 @@ class Store(Protocol):
 
 
 class KWalletStore:
-    """Talks to kwalletd over D-Bus with jeepney (pure Python, no dbus-python needed)."""
+    """Talks to kwalletd over D-Bus with jeepney (pure Python, no dbus-python needed).
+
+    A connection is opened for each operation and closed right after it, so nothing leaks no
+    matter how many times the store is looked up.
+    """
 
     name = "KWallet"
     _DAEMONS = (("org.kde.kwalletd6", "/modules/kwalletd6"), ("org.kde.kwalletd5", "/modules/kwalletd5"))
 
     def __init__(self):
-        self._conn = None
         self._addr = None
 
-    def _call(self, method: str, signature: str = "", body: tuple = (), timeout: float = 10):
+    @contextmanager
+    def _connection(self):
+        from jeepney.io.blocking import open_dbus_connection
+
+        try:
+            conn = open_dbus_connection(bus="SESSION")
+        except Exception as exc:
+            raise CredentialStoreError(f"KWallet: bus di sessione non raggiungibile ({exc})") from exc
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def _call(self, conn, method: str, signature: str = "", body: tuple = (), timeout: float = 10):
         from jeepney import new_method_call
         from jeepney.wrappers import DBusErrorResponse, unwrap_msg
 
         try:
-            reply = self._conn.send_and_get_reply(new_method_call(self._addr, method, signature, body), timeout=timeout)
+            reply = conn.send_and_get_reply(new_method_call(self._addr, method, signature, body), timeout=timeout)
             return unwrap_msg(reply)[0]
         except (DBusErrorResponse, TimeoutError, OSError) as exc:
             raise CredentialStoreError(f"KWallet: {method} non riuscito ({exc})") from exc
@@ -62,63 +81,57 @@ class KWalletStore:
     def available(self) -> bool:
         try:
             from jeepney import DBusAddress
-            from jeepney.io.blocking import open_dbus_connection
         except ImportError:
             return False
         try:
-            self._conn = open_dbus_connection(bus="SESSION")
-        except Exception:
-            return False
-        for bus_name, path in self._DAEMONS:
-            self._addr = DBusAddress(path, bus_name=bus_name, interface="org.kde.KWallet")
-            try:
-                if self._call("isEnabled"):
-                    return True
-            except CredentialStoreError:
-                continue
-        self._conn.close()
-        self._conn = None
-        return False
-
-    def _open(self) -> int:
-        wallet = self._call("networkWallet")
-        handle = self._call("open", "sxs", (wallet, 0, APP_ID), timeout=OPEN_TIMEOUT)
-        if handle < 0:
-            raise CredentialStoreError("KWallet: accesso al portafoglio negato o annullato")
-        return handle
-
-    def _close(self, handle: int) -> None:
-        try:
-            self._call("close", "ibs", (handle, False, APP_ID))
+            with self._connection() as conn:
+                for bus_name, path in self._DAEMONS:
+                    self._addr = DBusAddress(path, bus_name=bus_name, interface="org.kde.KWallet")
+                    try:
+                        if self._call(conn, "isEnabled"):
+                            return True
+                    except CredentialStoreError:
+                        continue
         except CredentialStoreError:
             pass
+        self._addr = None
+        return False
+
+    @contextmanager
+    def _wallet(self):
+        """(connection, open wallet handle); both released afterwards."""
+        if self._addr is None and not self.available():
+            raise CredentialStoreError("KWallet non è disponibile.")
+        with self._connection() as conn:
+            wallet = self._call(conn, "networkWallet")
+            handle = self._call(conn, "open", "sxs", (wallet, 0, APP_ID), timeout=OPEN_TIMEOUT)
+            if handle < 0:
+                raise CredentialStoreError("KWallet: accesso al portafoglio negato o annullato.")
+            try:
+                yield conn, handle
+            finally:
+                try:
+                    self._call(conn, "close", "ibs", (handle, False, APP_ID))
+                except CredentialStoreError:
+                    pass
 
     def get(self, key: str) -> str | None:
-        handle = self._open()
-        try:
-            if not self._call("hasEntry", "isss", (handle, SERVICE, key, APP_ID)):
+        with self._wallet() as (conn, handle):
+            if not self._call(conn, "hasEntry", "isss", (handle, SERVICE, key, APP_ID)):
                 return None
-            return self._call("readPassword", "isss", (handle, SERVICE, key, APP_ID))
-        finally:
-            self._close(handle)
+            return self._call(conn, "readPassword", "isss", (handle, SERVICE, key, APP_ID))
 
     def set(self, key: str, value: str) -> None:
-        handle = self._open()
-        try:
-            if not self._call("hasFolder", "iss", (handle, SERVICE, APP_ID)):
-                self._call("createFolder", "iss", (handle, SERVICE, APP_ID))
-            if self._call("writePassword", "issss", (handle, SERVICE, key, value, APP_ID)) != 0:
-                raise CredentialStoreError("KWallet: impossibile salvare la password")
-        finally:
-            self._close(handle)
+        with self._wallet() as (conn, handle):
+            if not self._call(conn, "hasFolder", "iss", (handle, SERVICE, APP_ID)):
+                self._call(conn, "createFolder", "iss", (handle, SERVICE, APP_ID))
+            if self._call(conn, "writePassword", "issss", (handle, SERVICE, key, value, APP_ID)) != 0:
+                raise CredentialStoreError("KWallet: impossibile salvare la password.")
 
     def delete(self, key: str) -> None:
-        handle = self._open()
-        try:
-            if self._call("hasEntry", "isss", (handle, SERVICE, key, APP_ID)):
-                self._call("removeEntry", "isss", (handle, SERVICE, key, APP_ID))
-        finally:
-            self._close(handle)
+        with self._wallet() as (conn, handle):
+            if self._call(conn, "hasEntry", "isss", (handle, SERVICE, key, APP_ID)):
+                self._call(conn, "removeEntry", "isss", (handle, SERVICE, key, APP_ID))
 
 
 class SecretServiceStore:
@@ -174,17 +187,17 @@ def candidate_stores() -> list[Store]:
     return stores[::-1] if on_kde else stores
 
 
-def stored_password() -> str | None:
+def stored_password(store: Store | None = None) -> str | None:
     """The Aruba password saved in the wallet, or None (no wallet, or nothing saved)."""
-    store = get_store()
+    store = store or get_store()
     return store.get(PASSWORD_KEY) if store else None
 
 
-def stored_login() -> tuple[str, str] | None:
+def stored_login(store: Store | None = None) -> tuple[str, str] | None:
     """(username, domain) saved in the wallet, or None."""
     from .logsetup import register_personal
 
-    store = get_store()
+    store = store or get_store()
     login = store.get(LOGIN_KEY) if store else None
     if not login:
         return None

@@ -16,6 +16,15 @@ _NO_LINK = {errno.EPERM, errno.EOPNOTSUPP, errno.ENOTSUP, errno.ENOSYS, errno.EX
 _MAX_COPIES = 999
 
 
+def _umask() -> int:
+    current = os.umask(0)
+    os.umask(current)
+    return current
+
+
+_FILE_MODE = 0o666 & ~_umask()  # what a normal "save" would give the user (read once, at import)
+
+
 def signed_pdf_name(src: Path) -> str:
     return f"{src.stem}_firmato{src.suffix}"
 
@@ -73,7 +82,7 @@ def write_new(directory: Path, name: str, data: bytes) -> Path:
                 continue
         else:
             raise FileError(f"Troppe copie di {name} in {directory}: scegli un'altra cartella.")
-        os.chmod(target, 0o644)
+        os.chmod(target, _FILE_MODE)
         return target
     except OSError as exc:
         raise FileError(f"Impossibile salvare {name} in {directory}: {exc.strerror}") from exc
