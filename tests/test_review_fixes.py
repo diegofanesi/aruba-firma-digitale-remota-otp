@@ -35,12 +35,14 @@ def test_store_errors_are_firma_errors_with_a_message():
     assert isinstance(exc, FirmaError) and exc.message == "KWallet: negato"
 
 
-def test_cli_survives_a_broken_wallet(monkeypatch, capsys):
+def test_cli_survives_a_broken_wallet(monkeypatch, capsys, tmp_path, make_pdf):
     """Before the fix this crashed with AttributeError: 'CredentialStoreError' has no 'message'."""
     monkeypatch.setattr(credentials, "get_store", lambda: BrokenStore())
-    assert cli._password() is None
-    assert "Avviso: KWallet: accesso al portafoglio negato" in capsys.readouterr().err
     monkeypatch.setattr(cli, "make_api", lambda: FakeArss())
+    pdf = tmp_path / "a.pdf"
+    pdf.write_bytes(make_pdf((595, 842, 0, None)))
+    assert cli.main(["pdf", str(pdf)]) == 1
+    assert "Errore: KWallet: accesso al portafoglio negato" in capsys.readouterr().err
     assert cli.main(["diagnostica"]) == 1
     assert "[ERRORE]  Portachiavi: KWallet" in capsys.readouterr().out
 

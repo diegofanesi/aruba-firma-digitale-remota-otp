@@ -66,7 +66,7 @@ from firmaremota import config  # noqa: E402
 from firmaremota.arss.client import MSG_OTP  # noqa: E402
 from firmaremota.errors import OtpError, ServiceError  # noqa: E402
 
-from .conftest import PASSWORD  # noqa: E402
+from .conftest import PASSWORD, add_profile  # noqa: E402
 from firmaremota.errors import CredentialsError  # noqa: E402
 from .fakes import FakeArss, signer_info  # noqa: E402
 from .test_verify import RootsTrust  # noqa: E402
@@ -214,3 +214,19 @@ def test_verifica(pki, make_p7m, tmp_path, monkeypatch, capsys):
     assert cli.main(["verifica", str(bad)]) == 1
     out = capsys.readouterr().out
     assert "FIRMA NON VALIDA" in out and "modificato dopo la firma" in out
+
+
+def test_account_selection(api, configured, tmp_path, make_pdf, monkeypatch, capsys):
+    anna = add_profile(configured, "Anna", "anna.bianchi@frStudio", "pw-anna")
+    (tmp_path / "a.pdf").write_bytes(make_pdf(A4))
+    answers(monkeypatch, "12345678")
+    assert cli.main(["pdf", "--account", "anna", str(tmp_path / "a.pdf")]) == 0  # alias, case-insensitive
+    assert api.calls[0] == ("list_certs", "pw-anna") and config.load().last_profile == anna.id
+    assert cli.main(["pdf", "--account", "Luigi", str(tmp_path / "a.pdf")]) == 3
+    assert "Nessun account si chiama «Luigi»" in capsys.readouterr().err
+    assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 3  # several accounts, no flag, not a terminal
+    assert "--account" in capsys.readouterr().err
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    asked = answers(monkeypatch, "", "12345678")  # menu: Enter takes the default, the account used last
+    assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 0
+    assert asked[0].startswith("Numero [2]") and [c for c in api.calls if c[0] == "list_certs"][-1][1] == "pw-anna"

@@ -187,7 +187,7 @@ def sign_pdf(pki):
 
 
 PASSWORD = "pw-salvata"
-LOGIN = ("mario.rossi", "firma")
+PROFILE_ID = "a1b2c3d4e5f60718"
 
 
 class MemoryStore:
@@ -208,9 +208,28 @@ class MemoryStore:
         self.data.pop(key, None)
 
 
+def add_profile(store, alias, login, password=None, id=None):
+    """Put an account into a fake wallet the way the app lays it out; returns the Profile."""
+    import json
+
+    from firmaremota import credentials, profiles
+
+    user, domain = credentials.split_login(login)
+    profile = profiles.Profile(id or f"{abs(hash(alias)) % 10**16:016x}", alias, user, domain)
+    index = json.loads(store.data.get(profiles.INDEX_KEY, "[]"))
+    index.append({"id": profile.id, "alias": profile.alias, "login": profile.login})
+    store.data[profiles.INDEX_KEY] = json.dumps(index)
+    if password is not None:
+        store.data[profile.password_key] = password
+    return profile
+
+
 @pytest.fixture
 def configured(monkeypatch):
-    """Mario Rossi's username and password in a fake wallet (the only place they are kept)."""
-    store = MemoryStore({credentials.PASSWORD_KEY: PASSWORD, credentials.LOGIN_KEY: "mario.rossi@firma"})
+    """One account, "Mario" (mario.rossi@firma), with its password, in a fake wallet."""
+    from firmaremota import credentials
+
+    store = MemoryStore()
+    add_profile(store, "Mario", "mario.rossi@firma", PASSWORD, id=PROFILE_ID)
     monkeypatch.setattr(credentials, "get_store", lambda: store)
     return store

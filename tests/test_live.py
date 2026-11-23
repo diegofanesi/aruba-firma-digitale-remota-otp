@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from firmaremota import config, credentials, p7m, service, verify
+from firmaremota import config, credentials, p7m, profiles, service, verify
 from firmaremota.arss.client import ArssClient
 from firmaremota.models import Kind, SignJob, StampSpec
 
@@ -33,10 +33,13 @@ def real_wallet(monkeypatch):
 
 
 def test_one_session_signs_and_verifies_everything(real_wallet, tmp_path, make_pdf):
-    login, password = credentials.stored_login(), credentials.stored_password()
-    assert login and password, "username/password not in the wallet: run 'firma configura' first"
+    store = credentials.get_store()
+    available = profiles.load_all(store) if store else []
+    profile = next((p for p in available if profiles.password(store, p)), None)
+    assert profile, "no account with a saved password in the wallet: run 'firma configura' first"
     api = ArssClient()
-    account, signer = service.prepare_account(api, *login, password, config.load(REAL_CONFIG))
+    account, signer = service.prepare_account(api, profile.user, profile.domain, profiles.password(store, profile),
+                                              config.load(REAL_CONFIG))
     out = Path(os.environ.get("FIRMA_LIVE_DIR") or tmp_path / "firmati")
     out.mkdir(parents=True, exist_ok=True)
 

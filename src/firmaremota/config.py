@@ -41,6 +41,7 @@ class Settings:
     stamp: str = "no"  # GUI: remember whether a visible stamp was wanted ("si"/"no")
     stamp_page: str = "ultima"  # "ultima", "prima" or a page number
     stamp_position: str = "basso-destra"
+    last_profile: str = ""  # the random id of the account used last (never its alias or username)
 
 
 def _read(path: Path) -> configparser.ConfigParser:

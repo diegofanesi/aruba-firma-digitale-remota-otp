@@ -8,7 +8,7 @@ import platform
 from dataclasses import dataclass
 from importlib import metadata
 
-from . import __version__, credentials, logsetup, service, trustlist
+from . import __version__, credentials, logsetup, profiles, service, trustlist
 from .errors import FirmaError
 
 OK, WARNING, ERROR, INFO = "ok", "avviso", "errore", "info"
@@ -47,29 +47,23 @@ def _system() -> list[Line]:
     ]
 
 
-def _account(store) -> tuple[list[Line], tuple[str, str] | None]:
-    try:
-        login = credentials.stored_login(store)
-    except credentials.CredentialStoreError as exc:
-        return [Line(ERROR, "Portachiavi", exc.message)], None
+def _accounts(store) -> tuple[list[Line], list[profiles.Profile]]:
     if store is None:
-        return [Line(INFO, "Account", "nessun portachiavi: nome utente e password vengono chiesti a ogni firma")], None
-    if login is None:
-        return [Line(WARNING, "Account", "non salvato: verrà chiesto a ogni firma ('firma configura' per salvarlo)")], None
-    user, domain = login
-    return [Line(OK, "Account", f"{logsetup.partial(user)}@{domain} (nel portachiavi; sul disco nulla)")], login
-
-
-def _password(store) -> list[Line]:
+        return [Line(INFO, "Account", "nessun portachiavi: nome utente e password vengono chiesti a ogni firma")], []
     try:
-        if store is None:
-            return [Line(WARNING, "Password", "nessun portachiavi disponibile: verrà chiesta ogni volta")]
-        saved = store.get(credentials.PASSWORD_KEY) is not None
+        available = profiles.load_all(store)
+        saved = {p.id: profiles.password(store, p) is not None for p in available}
     except credentials.CredentialStoreError as exc:
-        return [Line(ERROR, "Portachiavi", exc.message)]
-    if saved:
-        return [Line(OK, "Password", f"salvata in {store.name}")]
-    return [Line(WARNING, "Password", f"non salvata ({store.name} disponibile): verrà chiesta ogni volta")]
+        return [Line(ERROR, "Portachiavi", exc.message)], []
+    if not available:
+        return [Line(WARNING, "Account", f"nessuno salvato in {store.name}: verrà chiesto a ogni firma "
+                                         "('firma configura' per salvarlo)")], []
+    lines = [Line(INFO, "Portachiavi", f"{store.name}, {len(available)} account; sul disco nulla")]
+    for p in available:
+        detail = "password salvata" if saved[p.id] else "password non salvata: verrà chiesta"
+        lines.append(Line(OK if saved[p.id] else WARNING, f"Account «{logsetup.partial(p.alias)}»",
+                          f"{logsetup.partial(p.user)}@{p.domain}, {detail}"))
+    return lines, available
 
 
 def _failures() -> list[Line]:
@@ -95,29 +89,34 @@ def _trust_list() -> list[Line]:
     return [Line(status, "Elenco certificatori", f"scaricato il {fetched.astimezone():%d/%m/%Y}")]
 
 
-def _certificate(api, login: tuple[str, str], password: str) -> list[Line]:
-    """Ask Aruba (password only, no OTP): credentials accepted? which certificate, valid until when?"""
-    try:
-        _, signer = service.prepare_account(api, *login, password)
-    except FirmaError as exc:
-        return [Line(ERROR, "Credenziali", exc.message)]
-    lines = [Line(OK, "Credenziali", "accettate da Aruba")]
-    expires = signer.not_after.astimezone().date()
-    who = f"di {logsetup.partial(signer.name)}, "
-    if expires - dt.date.today() < EXPIRY_WARNING:
-        lines.append(Line(WARNING, "Certificato", f"{who}scade il {expires:%d/%m/%Y}: rinnovalo per tempo"))
-    else:
-        lines.append(Line(OK, "Certificato", f"{who}valido fino al {expires:%d/%m/%Y}"))
+def _certificates(api, store, available: list[profiles.Profile]) -> list[Line]:
+    """Ask Aruba (password only, no OTP) about every account with a saved password."""
+    lines = []
+    for p in available:
+        password = profiles.password(store, p)
+        if not password:
+            continue
+        label = f"Credenziali «{logsetup.partial(p.alias)}»"
+        try:
+            _, signer = service.prepare_account(api, p.user, p.domain, password)
+        except FirmaError as exc:
+            lines.append(Line(ERROR, label, exc.message))
+            continue
+        expires = signer.not_after.astimezone().date()
+        if expires - dt.date.today() < EXPIRY_WARNING:
+            lines.append(Line(WARNING, label, f"accettate; il certificato scade il {expires:%d/%m/%Y}: rinnovalo"))
+        else:
+            lines.append(Line(OK, label, f"accettate; certificato valido fino al {expires:%d/%m/%Y}"))
     return lines
 
 
-def report(api, password: str | None = None, check_account: bool = False) -> list[Line]:
-    """All local checks; with `check_account` and a password it also asks Aruba (no OTP)."""
+def report(api, check_credentials: bool = False) -> list[Line]:
+    """All local checks; with `check_credentials` it also asks Aruba about each saved account (no OTP)."""
     store = credentials.get_store()
-    account_lines, login = _account(store)
-    lines = _system() + account_lines + _password(store) + _failures() + _service(api) + _trust_list()
-    if check_account and login and password:
-        lines += _certificate(api, login, password)
+    account_lines, available = _accounts(store)
+    lines = _system() + account_lines + _failures() + _service(api) + _trust_list()
+    if check_credentials and available:
+        lines += _certificates(api, store, available)
     lines.append(Line(INFO, "Registro", str(logsetup.log_path())))
     return lines
 

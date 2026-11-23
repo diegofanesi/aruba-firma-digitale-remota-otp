@@ -1,4 +1,4 @@
-"""Dialogs: OTP code, password, account setup, support report."""
+"""Dialogs: OTP code, missing credentials, account editing and management, support report."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ import re
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPlainTextEdit, QPushButton, QVBoxLayout,
+    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout,
 )
 
-from .. import credentials, service
+from .. import credentials, profiles, service
 from ..errors import FirmaError
 from . import worker
 
@@ -29,11 +29,13 @@ def _label(text: str, *, wrap: bool = True, style: str = "") -> QLabel:
 class OtpDialog(QDialog):
     """Asks for the code shown by the Aruba OTP app. Digits only; OK needs 6–8 of them."""
 
-    def __init__(self, parent, count: int, failures: int, note: str = ""):
+    def __init__(self, parent, count: int, failures: int, note: str = "", who: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Codice OTP")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
+        if who:
+            layout.addWidget(_label(f"Account: <b>{who}</b>"))
         layout.addWidget(_label("Apri l'app <b>Aruba OTP</b> sul telefono e scrivi qui il codice che vedi."))
         if note:
             layout.addWidget(_label(note, style=WARNING_STYLE))
@@ -64,8 +66,8 @@ class OtpDialog(QDialog):
         self._update()
 
     def _clean(self, text: str) -> None:
-        # Keep digits only, at most 8. No setMaxLength: it would cut a pasted "1234 5678" before cleaning.
-        digits = re.sub(r"[^0-9]", "", text)[:8]  # ASCII digits only
+        # Keep ASCII digits only, at most 8. No setMaxLength: it would cut a pasted "1234 5678" before cleaning.
+        digits = re.sub(r"[^0-9]", "", text)[:8]
         if digits != text:
             self.code.setText(digits)
         self._update()
@@ -81,12 +83,15 @@ class OtpDialog(QDialog):
 class LoginDialog(QDialog):
     """Asks for what the wallet doesn't have: the username (if needed) and the password."""
 
-    def __init__(self, parent, need_user: bool, store_name: str | None):
+    def __init__(self, parent, need_user: bool, store_name: str | None, who: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Account Aruba")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
-        layout.addWidget(_label("Scrivi i dati del tuo account di firma remota Aruba."))
+        if who:
+            layout.addWidget(_label(f"Account: <b>{who}</b>"))
+        layout.addWidget(_label("Scrivi i dati del tuo account di firma remota Aruba." if need_user
+                                else "Scrivi la password del tuo account di firma remota Aruba."))
         form = QFormLayout()
         self.user = None
         if need_user:
@@ -97,7 +102,7 @@ class LoginDialog(QDialog):
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         form.addRow("Password:", self.password)
         layout.addLayout(form)
-        self.remember = QCheckBox(f"Ricorda nome utente e password ({store_name})") if store_name else None
+        self.remember = QCheckBox(f"Ricorda la password ({store_name})") if store_name else None
         if self.remember:
             self.remember.setChecked(True)
             layout.addWidget(self.remember)
@@ -114,25 +119,33 @@ class LoginDialog(QDialog):
         return login, self.password.text(), bool(self.remember and self.remember.isChecked())
 
 
-class SetupDialog(QDialog):
-    """Username, domain and password, checked with Aruba (no OTP); kept only in the wallet, if at all."""
+class ProfileEditDialog(QDialog):
+    """Add or edit one account: alias, username, domain, password. Checked with Aruba (no OTP) before saving."""
 
-    def __init__(self, parent, api_factory, first_run: bool, current: tuple[str, str] | None = None):
+    def __init__(self, parent, api_factory, store, existing: list[profiles.Profile],
+                 profile: profiles.Profile | None = None):
         super().__init__(parent)
-        self.api_factory = api_factory
-        self.store = credentials.get_store()
-        self.login: tuple[str, str] | None = current  # what is remembered after saving (None: nothing)
-        self.setWindowTitle("Benvenuto" if first_run else "Impostazioni")
+        self.api_factory, self.store = api_factory, store
+        self.existing, self.editing = existing, profile
+        self.profiles = existing  # the updated list once saved
+        self.profile: profiles.Profile | None = None  # the saved profile
+        self.setWindowTitle("Modifica account" if profile else "Nuovo account")
         self.setMinimumWidth(720)
         layout = QVBoxLayout(self)
         layout.addWidget(_label("Dati dell'account di firma remota Aruba."))
         form = QFormLayout()
-        self.user = QLineEdit(current[0] if current else "")
+        self.alias = QLineEdit(profile.alias if profile else "")
+        self.alias.setPlaceholderText("come vuoi vederlo nell'elenco, per esempio il nome di chi firma")
+        self.user = QLineEdit(profile.user if profile else "")
         self.user.setPlaceholderText("nome.cognome oppure nome.cognome@firma")
         self.user.editingFinished.connect(self._split_domain)
-        self.domain = QLineEdit(current[1] if current else "firma")
+        self.domain = QLineEdit(profile.domain if profile else "firma")
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.has_saved_password = bool(profile and profiles.password(store, profile))
+        if self.has_saved_password:
+            self.password.setPlaceholderText("lascia vuoto per non cambiarla")
+        form.addRow("Nome:", self.alias)
         form.addRow("Nome utente:", self.user)
         form.addRow("Dominio di firma:", self.domain)
         form.addRow("Password:", self.password)
@@ -140,20 +153,12 @@ class SetupDialog(QDialog):
         hint = _label("Il dominio è quasi sempre «firma».")
         hint.setObjectName("hint")
         layout.addWidget(hint)
-        if self.store:
-            self.remember = QCheckBox(f"Ricorda nome utente e password ({self.store.name})")
-            self.remember.setChecked(True)
-            layout.addWidget(self.remember)
-        else:
-            self.remember = None
-            layout.addWidget(_label("Su questo computer nome utente e password verranno chiesti a ogni firma."))
+        self.remember = QCheckBox(f"Ricorda la password ({store.name})")
+        self.remember.setChecked(self.has_saved_password if profile else True)
+        layout.addWidget(self.remember)
         self.status = _label("")
         layout.addWidget(self.status)
         row = QHBoxLayout()
-        self.forget = QPushButton("Dimentica nome utente e password")
-        self.forget.clicked.connect(self._forget)
-        self.forget.setVisible(bool(self.store and current))
-        row.addWidget(self.forget)
         row.addStretch()
         self.cancel = QPushButton("Annulla")
         self.cancel.clicked.connect(self.reject)
@@ -163,54 +168,155 @@ class SetupDialog(QDialog):
         row.addWidget(self.cancel)
         row.addWidget(self.check)
         layout.addLayout(row)
+        (self.alias if profile else self.user).setFocus()
 
     def _split_domain(self) -> None:
         if "@" in self.user.text():
             user, domain = credentials.split_login(self.user.text())
             self.user.setText(user)
             self.domain.setText(domain)
+        if not self.alias.text().strip() and self.user.text().strip():
+            self.alias.setText(self.user.text().strip())
 
     def _set_busy(self, busy: bool, message: str = "", style: str = "") -> None:
-        for widget in (self.user, self.domain, self.password, self.check, self.cancel, self.forget):
+        for widget in (self.alias, self.user, self.domain, self.password, self.remember, self.check, self.cancel):
             widget.setEnabled(not busy)
         self.status.setText(message)
         self.status.setStyleSheet(style)
 
     def _check(self) -> None:
         self._split_domain()
-        user, domain, password = self.user.text().strip(), self.domain.text().strip(), self.password.text()
-        if not (user and domain and password):
-            self._set_busy(False, "Compila nome utente, dominio e password.", WARNING_STYLE)
+        alias, user, domain = self.alias.text().strip(), self.user.text().strip(), self.domain.text().strip()
+        password = self.password.text()
+        if not password and self.has_saved_password:
+            password = profiles.password(self.store, self.editing) or ""
+        if not (alias and user and domain and password):
+            self._set_busy(False, "Compila nome, nome utente, dominio e password.", WARNING_STYLE)
+            return
+        try:
+            profile = profiles.new_profile(alias, user, domain, id=self.editing.id if self.editing else None)
+            clash = profiles.find(self.existing, alias)
+            if clash is not None and clash.id != profile.id:
+                raise FirmaError(f"C'è già un account chiamato «{clash.alias}»: scegli un altro nome.")
+        except FirmaError as exc:
+            self._set_busy(False, exc.message, WARNING_STYLE)
             return
         self._set_busy(True, "Controllo in corso con Aruba (non serve il codice OTP)...")
         job = worker.Worker(service.prepare_account, self.api_factory(), user, domain, password)
-        worker.start(self, job, lambda result: self._checked(user, domain, password), self._failed)
+        worker.start(self, job, lambda result: self._checked(profile, password), self._failed)
 
     def _failed(self, exc: Exception) -> None:
         message = exc.message if isinstance(exc, FirmaError) else f"Errore imprevisto: {exc}"
         self._set_busy(False, message, WARNING_STYLE)
 
-    def _checked(self, user: str, domain: str, password: str) -> None:
+    def _checked(self, profile: profiles.Profile, password: str) -> None:
         try:
-            if self.store is not None:
-                if self.remember is not None and self.remember.isChecked():
-                    credentials.save_account(self.store, user, domain, password)
-                    self.login = (user, domain)
-                else:
-                    credentials.forget_account(self.store)
-                    self.login = None
-        except credentials.CredentialStoreError as exc:
+            self.profiles = profiles.upsert(self.store, self.existing, profile)
+            if self.remember.isChecked():
+                profiles.set_password(self.store, profile, password)
+            else:
+                profiles.forget_password(self.store, profile)
+        except FirmaError as exc:
             self._set_busy(False, exc.message, WARNING_STYLE)
             return
+        self.profile = profile
         self.accept()
 
-    def _forget(self) -> None:
+
+class ProfilesDialog(QDialog):
+    """The list of accounts, with add / edit / remove / forget-password."""
+
+    def __init__(self, parent, api_factory, store, existing: list[profiles.Profile]):
+        super().__init__(parent)
+        self.api_factory, self.store = api_factory, store
+        self.profiles = list(existing)
+        self.setWindowTitle("Account")
+        self.setMinimumSize(720, 480)
+        layout = QVBoxLayout(self)
+        layout.addWidget(_label("Gli account di firma salvati su questo computer. Nome utente e password stanno "
+                                f"in {store.name}; sul disco non viene salvato nulla."))
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(lambda item: self.edit())
+        layout.addWidget(self.list)
+        self.status = _label("")
+        layout.addWidget(self.status)
+        row = QHBoxLayout()
+        self.add_button = QPushButton("Aggiungi")
+        self.edit_button = QPushButton("Modifica")
+        self.remove_button = QPushButton("Rimuovi")
+        self.forget_button = QPushButton("Dimentica la password")
+        self.add_button.clicked.connect(self.add)
+        self.edit_button.clicked.connect(self.edit)
+        self.remove_button.clicked.connect(self.remove)
+        self.forget_button.clicked.connect(self.forget_password)
+        for button in (self.add_button, self.edit_button, self.remove_button, self.forget_button):
+            row.addWidget(button)
+        row.addStretch()
+        close = QPushButton("Chiudi")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        layout.addLayout(row)
+        self.list.currentRowChanged.connect(lambda _: self._update_buttons())
+        self.refresh()
+
+    def refresh(self, select: profiles.Profile | None = None) -> None:
+        self.list.clear()
+        for profile in self.profiles:
+            saved = "" if profiles.password(self.store, profile) else "  (password non salvata)"
+            self.list.addItem(f"{profile.alias}  —  {profile.login}{saved}")
+        if self.profiles:
+            self.list.setCurrentRow(self.profiles.index(select) if select in self.profiles else 0)
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        enabled = self.selected() is not None
+        for button in (self.edit_button, self.remove_button, self.forget_button):
+            button.setEnabled(enabled)
+
+    def selected(self) -> profiles.Profile | None:
+        row = self.list.currentRow()
+        return self.profiles[row] if 0 <= row < len(self.profiles) else None
+
+    def confirm(self, text: str) -> bool:  # seam for tests
+        return QMessageBox.question(self, "Conferma", text) == QMessageBox.StandardButton.Yes
+
+    def _edit_dialog(self, profile: profiles.Profile | None) -> None:
+        dialog = ProfileEditDialog(self, self.api_factory, self.store, self.profiles, profile)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.profiles = dialog.profiles
+            self.refresh(dialog.profile)
+            self.status.setText(f"Account «{dialog.profile.alias}» salvato.")
+
+    def add(self) -> None:
+        self._edit_dialog(None)
+
+    def edit(self) -> None:
+        if self.selected() is not None:
+            self._edit_dialog(self.selected())
+
+    def remove(self) -> None:
+        profile = self.selected()
+        if profile is None or not self.confirm(f"Rimuovere l'account «{profile.alias}» da questo computer?"):
+            return
         try:
-            credentials.forget_account(self.store)
-            self.login = None
-            self._set_busy(False, "Nome utente e password dimenticati: verranno chiesti alla prossima firma.")
-        except credentials.CredentialStoreError as exc:
-            self._set_busy(False, exc.message, WARNING_STYLE)
+            self.profiles = profiles.remove(self.store, self.profiles, profile)
+        except FirmaError as exc:
+            self.status.setText(exc.message)
+            return
+        self.refresh()
+        self.status.setText(f"Account «{profile.alias}» rimosso.")
+
+    def forget_password(self) -> None:
+        profile = self.selected()
+        if profile is None:
+            return
+        try:
+            profiles.forget_password(self.store, profile)
+        except FirmaError as exc:
+            self.status.setText(exc.message)
+            return
+        self.refresh(profile)
+        self.status.setText(f"Password di «{profile.alias}» dimenticata: verrà chiesta alla prossima firma.")
 
 
 class TextDialog(QDialog):

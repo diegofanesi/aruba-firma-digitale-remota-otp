@@ -12,19 +12,19 @@ from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import QDropEvent  # noqa: E402
 from PySide6.QtWidgets import QDialog  # noqa: E402
 
-from firmaremota import config, credentials, verify  # noqa: E402
+from firmaremota import config, credentials, profiles, verify  # noqa: E402
 from firmaremota.arss.client import MSG_OTP  # noqa: E402
 from firmaremota.errors import CredentialsError, OtpError, ServiceError  # noqa: E402
-from firmaremota.gui.dialogs import OtpDialog, SetupDialog  # noqa: E402
+from firmaremota.gui.dialogs import OtpDialog, ProfileEditDialog, ProfilesDialog  # noqa: E402
 from firmaremota.gui.main_window import MainWindow  # noqa: E402
 from firmaremota.models import Kind, Position  # noqa: E402
 
-from .conftest import PASSWORD  # noqa: E402
+from .conftest import PASSWORD, PROFILE_ID, add_profile  # noqa: E402
 from .fakes import FakeArss, signer_info  # noqa: E402
 from .test_verify import PDF, RootsTrust  # noqa: E402
 
 A4 = (595, 842, 0, None)
-PW, USER = credentials.PASSWORD_KEY, credentials.LOGIN_KEY
+PW = f"password:{PROFILE_ID}"
 
 
 class Recorder:
@@ -89,7 +89,7 @@ def test_sign_pdf_with_stamp(window, api, qtbot, tmp_path, make_pdf):
     wait_for(qtbot, window, window.result)
     assert window.result.title.text() == "Fatto! 2 documenti firmati."
     assert (tmp_path / "a_firmato.pdf").exists() and (tmp_path / "b_firmato.pdf").exists()
-    assert window.ask_otp.calls == [(2, 0, "")]
+    assert window.ask_otp.calls == [(2, 0, "", "Mario")]
     assert api.names()[:2] == ["list_certs", "open_session"]  # account checked before the OTP is used
     assert next(c for c in api.calls if c[0] == "sign_pdf")[4] == "Firmato digitalmente da Mario Rossi\nVisto"
     assert config.load().stamp == "si" and config.load().stamp_position == "alto-sinistra"
@@ -128,7 +128,7 @@ def test_refused_otp_goes_home_and_warns_next_time(window, api, qtbot, tmp_path,
     window.prepare_sign(paths, Kind.PADES)
     window.options.sign.click()
     qtbot.waitUntil(lambda: len(window.show_error.calls) == 2, timeout=10000)  # second attempt fully done
-    assert window.ask_otp.calls[-1] == (1, 1, "")  # the dialog showed the warning
+    assert window.ask_otp.calls[-1] == (1, 1, "", "Mario")  # the dialog showed the warning
     assert config.load_state().auth_failures == 2
 
 
@@ -163,36 +163,79 @@ def test_partial_batch_and_retry(window, api, qtbot, tmp_path, make_pdf):
     assert len(window.ask_otp.calls) == 2 and (tmp_path / "b_firmato.pdf").exists()
 
 
-def test_first_signature_asks_and_remembers_after_aruba_accepts(window, store, api, qtbot, tmp_path, make_pdf):
-    store.data.clear()
-    window.login = None
-    window.ask_login = Recorder((("mario.rossi", "firma"), PASSWORD, True))
+def test_missing_password_is_asked_and_remembered_after_aruba_accepts(window, store, api, qtbot, tmp_path, make_pdf):
+    del store.data[PW]
+    window.ask_login = Recorder((None, PASSWORD, True))
     api.open_error = OtpError(MSG_OTP)  # the OTP will fail, but Aruba has already accepted the password
     window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
     window.options.sign.click()
     qtbot.waitUntil(lambda: bool(window.show_error.calls), timeout=10000)
-    assert window.ask_login.calls == [(True, "Portachiavi di prova")]
-    assert store.data == {USER: "mario.rossi@firma", PW: PASSWORD}
-    assert window.home.account.text() == "Account: mario.rossi@firma"
+    assert window.ask_login.calls == [(False, "Portachiavi di prova", "Mario")]
+    assert store.data[PW] == PASSWORD
 
 
-def test_refused_typed_credentials_are_not_remembered(window, store, api, qtbot, tmp_path, make_pdf):
-    store.data.clear()
-    window.login = None
-    window.ask_login = Recorder((("mario.rossi", "firma"), "sbagliata", True))
+def test_refused_typed_password_is_not_remembered(window, store, api, qtbot, tmp_path, make_pdf):
+    del store.data[PW]
+    window.ask_login = Recorder((None, "sbagliata", True))
     api.certs = CredentialsError("Nome utente, dominio o password non accettati.")
     window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
     window.options.sign.click()
     qtbot.waitUntil(lambda: bool(window.show_error.calls), timeout=10000)
-    assert store.data == {} and window.ask_otp.calls == []
+    assert PW not in store.data and window.ask_otp.calls == []
 
 
-def test_home_shows_account_from_the_wallet(window, qtbot, store, api):
-    assert window.home.account.text() == "Account: mario.rossi@firma"
+def test_no_account_yet_adds_one_before_signing(window, store, api, qtbot, tmp_path, make_pdf):
+    store.data.clear()
+    window._load_profiles()
+    assert window.profiles == [] and "Nessun account" in window.home.bar.caption.text()
+
+    def add_one():
+        profile = add_profile(store, "Mario", "mario.rossi@firma", PASSWORD, id=PROFILE_ID)
+        window._set_profiles(profiles.load_all(store), profile)
+        return True
+
+    window.add_first_profile = add_one
+    window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
+    window.options.sign.click()
+    wait_for(qtbot, window, window.result)
+    assert window.ask_otp.calls[0][3] == "Mario" and window.ask_login.calls == []
+
+
+def test_no_wallet_asks_everything_and_remembers_nothing(qtbot, monkeypatch, api, tmp_path, make_pdf):
+    monkeypatch.setattr(credentials, "get_store", lambda: None)
+    window = MainWindow(lambda: api)
+    qtbot.addWidget(window)
+    window.ask_otp, window.show_error = Recorder("12345678"), Recorder()
+    window.ask_login = Recorder((("mario.rossi", "firma"), PASSWORD, True))
+    window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
+    window.options.sign.click()
+    wait_for(qtbot, window, window.result)
+    assert window.ask_login.calls == [(True, None)]
+    assert window.ask_otp.calls[0][3] == "mario.rossi@firma"
+
+
+def test_home_shows_the_accounts(window, qtbot, store, api):
+    assert [b.text() for b in window.home.bar.buttons.values()] == ["Mario"]
+    assert window.home.bar.buttons[PROFILE_ID].isChecked() and window.current.alias == "Mario"
     store.data.clear()
     fresh = MainWindow(lambda: api)
     qtbot.addWidget(fresh)
-    assert fresh.home.account.text() == "Account: verrà chiesto alla prima firma"
+    assert fresh.home.bar.buttons == {} and "Nessun account" in fresh.home.bar.caption.text()
+
+
+def test_switch_account_by_clicking(window, store, api, qtbot, tmp_path, make_pdf):
+    anna = add_profile(store, "Anna", "anna.bianchi@frStudio", "pw-anna")
+    window._load_profiles()
+    assert window.current.alias == "Mario" and window.home.bar.caption.text() == "Chi firma?"
+    window.home.bar.buttons[anna.id].click()
+    assert window.current.alias == "Anna" and config.load().last_profile == anna.id
+    window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
+    window.options.sign.click()
+    wait_for(qtbot, window, window.result)
+    assert window.ask_otp.calls[0][3] == "Anna" and api.calls[0] == ("list_certs", "pw-anna")
+    restarted = MainWindow(lambda: api)  # the choice survives a restart
+    qtbot.addWidget(restarted)
+    assert restarted.current.alias == "Anna" and restarted.home.bar.buttons[anna.id].isChecked()
 
 
 def test_open_signed_p7m_and_extract(window, qtbot, tmp_path, make_p7m, pki, monkeypatch):
@@ -250,32 +293,61 @@ def test_otp_dialog_validation(qtbot):
     assert cautious.ok.isEnabled()
 
 
-def test_setup_dialog_keeps_only_the_wallet(qtbot, store, api):
+def test_profile_edit_dialog_adds_an_account(qtbot, store, api):
     store.data.clear()
-    dialog = SetupDialog(None, lambda: api, first_run=True)
+    dialog = ProfileEditDialog(None, lambda: api, store, [])
     qtbot.addWidget(dialog)
     dialog.user.setText("mario.rossi@firma")
-    dialog.domain.setText("")
     dialog.password.setText("Pw-1")
     dialog.check.click()
     qtbot.waitUntil(lambda: dialog.result() == QDialog.DialogCode.Accepted, timeout=10000)
-    assert store.data == {USER: "mario.rossi@firma", PW: "Pw-1"}
-    assert dialog.login == ("mario.rossi", "firma") and api.calls == [("list_certs", "Pw-1")]
+    assert (dialog.profile.alias, dialog.profile.login) == ("mario.rossi", "mario.rossi@firma")  # alias defaults
+    assert profiles.password(store, dialog.profile) == "Pw-1" and api.calls == [("list_certs", "Pw-1")]
     assert not config.config_dir().exists() or "mario" not in "".join(
         p.read_text() for p in config.config_dir().iterdir())
 
 
-def test_setup_dialog_refused(qtbot, store, api):
-    store.data.clear()
+def test_profile_edit_dialog_refused_and_duplicate(qtbot, store, api):
+    existing = profiles.load_all(store)
     api.certs = CredentialsError("Nome utente, dominio o password non accettati.")
-    dialog = SetupDialog(None, lambda: api, first_run=True)
+    dialog = ProfileEditDialog(None, lambda: api, store, existing)
     qtbot.addWidget(dialog)
-    dialog.user.setText("mario.rossi")
-    dialog.password.setText("sbagliata")
+    dialog.alias.setText("mario")  # same as "Mario", case-insensitively
+    dialog.user.setText("altro")
+    dialog.password.setText("x")
+    dialog.check.click()
+    assert "già un account chiamato «Mario»" in dialog.status.text() and api.calls == []
+    dialog.alias.setText("Altro")
     dialog.check.click()
     qtbot.waitUntil(lambda: "non accettati" in dialog.status.text(), timeout=10000)
-    assert dialog.result() != QDialog.DialogCode.Accepted and store.data == {}
+    assert dialog.result() != QDialog.DialogCode.Accepted and len(profiles.load_all(store)) == 1
     assert dialog.check.isEnabled()
+
+
+def test_profile_edit_dialog_keeps_the_saved_password(qtbot, store, api):
+    (mario,) = profiles.load_all(store)
+    dialog = ProfileEditDialog(None, lambda: api, store, [mario], mario)
+    qtbot.addWidget(dialog)
+    assert dialog.password.placeholderText().startswith("lascia vuoto")
+    dialog.alias.setText("Papà")
+    dialog.check.click()  # empty password field: the saved one is checked and kept
+    qtbot.waitUntil(lambda: dialog.result() == QDialog.DialogCode.Accepted, timeout=10000)
+    (renamed,) = profiles.load_all(store)
+    assert (renamed.id, renamed.alias) == (mario.id, "Papà") and profiles.password(store, renamed) == PASSWORD
+    assert api.calls == [("list_certs", PASSWORD)]
+
+
+def test_profiles_dialog_remove_and_forget(qtbot, store, api):
+    add_profile(store, "Anna", "anna.bianchi@firma", "pw-anna")
+    dialog = ProfilesDialog(None, lambda: api, store, profiles.load_all(store))
+    qtbot.addWidget(dialog)
+    dialog.confirm = lambda text: True
+    dialog.list.setCurrentRow(1)
+    dialog.remove()
+    assert [p.alias for p in dialog.profiles] == ["Mario"] and "Account «Anna» rimosso" in dialog.status.text()
+    dialog.list.setCurrentRow(0)
+    dialog.forget_password()
+    assert PW not in store.data and "(password non salvata)" in dialog.list.item(0).text()
 
 
 def test_support_report(window, qtbot, api):
@@ -283,7 +355,8 @@ def test_support_report(window, qtbot, api):
     window.home.support.click()
     qtbot.waitUntil(lambda: bool(window.show_support.calls), timeout=10000)
     text = window.show_support.calls[0][0]
-    assert "Account: m*********i@firma" in text and "Credenziali: accettate da Aruba" in text
+    assert "Account «M***o»: m*********i@firma, password salvata" in text
+    assert "Credenziali «M***o»: accettate" in text and "Mario" not in text
     assert PASSWORD not in text and "mario.rossi" not in text
 
 

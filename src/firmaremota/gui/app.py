@@ -19,8 +19,10 @@ STYLE = """
 QLabel#title { font-size: 26pt; font-weight: bold; }
 QLabel#subtitle { font-size: 18pt; }
 QLabel#hint { color: palette(placeholder-text); margin-left: 4px; }
-QLabel#drop { border: 2px dashed palette(mid); border-radius: 10px; padding: 18px; color: palette(placeholder-text); }
+QLabel#drop { border: 2px dashed palette(mid); border-radius: 10px; padding: 10px; color: palette(placeholder-text); }
 QPushButton#big { font-size: 18pt; padding: 14px 24px; }
+QPushButton#profile { font-size: 16pt; padding: 7px 16px; }
+QPushButton#profile:checked { background: palette(highlight); color: palette(highlighted-text); font-weight: bold; }
 QCheckBox#bigcheck { font-size: 16pt; padding: 8px 0; }
 QListWidget { font-size: 13pt; }
 QRadioButton::indicator, QCheckBox::indicator { width: 24px; height: 24px; }

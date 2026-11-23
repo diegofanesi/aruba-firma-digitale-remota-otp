@@ -10,18 +10,18 @@ from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton, QRadioButton, QSpinBox, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton, QRadioButton, QSizePolicy, QSpinBox,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 import datetime as dt
 
-from .. import config, credentials, diagnostics, files, messages, service, verify
+from .. import config, credentials, diagnostics, files, messages, profiles, service, verify
 from ..errors import FileError, FirmaError
 from ..logsetup import log_path, register_paths
 from ..models import LAST_PAGE, JobResult, Kind, Position, SignJob, StampSpec, VerifyReport
 from . import worker
-from .dialogs import LoginDialog, OtpDialog, SetupDialog, TextDialog
+from .dialogs import LoginDialog, OtpDialog, ProfileEditDialog, ProfilesDialog, TextDialog
 
 log = logging.getLogger("firmaremota.gui")
 
@@ -51,14 +51,60 @@ def _error_text(exc: Exception) -> str:
     return f"Si è verificato un errore imprevisto. I dettagli sono nel registro:\n{log_path()}"
 
 
+class ProfileBar(QWidget):
+    """The saved accounts as big toggle buttons; clicking one makes it the account that signs."""
+
+    chosen = Signal(str)  # profile id
+    PER_ROW = 3
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.caption = _label("", "subtitle")
+        layout.addWidget(self.caption)
+        self.grid = QGridLayout()
+        layout.addLayout(self.grid)
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        self.group.buttonClicked.connect(lambda button: self.chosen.emit(button.property("profile_id")))
+        self.buttons: dict[str, QPushButton] = {}
+
+    def refresh(self, available: list[profiles.Profile], current: profiles.Profile | None) -> None:
+        for button in self.buttons.values():
+            self.group.removeButton(button)
+            self.grid.removeWidget(button)
+            button.setParent(None)  # out of the widget tree now: deleteLater() alone would leave it painted
+            button.deleteLater()
+        self.buttons = {}
+        if not available:
+            self.caption.setText("Nessun account salvato: premi «Impostazioni» per aggiungerne uno, "
+                                 "oppure firma e ti verranno chiesti nome utente e password.")
+            return
+        self.caption.setText("Chi firma?" if len(available) > 1 else "Account")
+        for index, profile in enumerate(available):
+            button = QPushButton(profile.alias)
+            button.setObjectName("profile")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setCheckable(True)
+            button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)  # never squeezed
+            button.setProperty("profile_id", profile.id)
+            button.setChecked(current is not None and profile.id == current.id)
+            self.group.addButton(button)
+            self.grid.addWidget(button, index // self.PER_ROW, index % self.PER_ROW)
+            self.buttons[profile.id] = button
+
+
 class HomePage(QWidget):
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(48, 32, 48, 24)
+        layout.setContentsMargins(48, 20, 48, 16)
         layout.addWidget(_label("Firma remota", "title"))
+        self.bar = ProfileBar()
+        layout.addWidget(self.bar)
+        layout.addSpacing(6)
         layout.addWidget(_label("Cosa vuoi fare?", "subtitle"))
-        layout.addSpacing(16)
         self.sign_pdf = _big_button("Firma un PDF")
         self.sign_other = _big_button("Firma un altro file (.p7m)")
         self.open_signed = _big_button("Apri un file firmato")
@@ -69,14 +115,12 @@ class HomePage(QWidget):
         ):
             layout.addWidget(button)
             layout.addWidget(_label(hint, "hint"))
-            layout.addSpacing(10)
+            layout.addSpacing(4)
         drop = _label("Puoi anche trascinare qui i file da firmare o da controllare.", "drop")
         drop.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(drop)
         layout.addStretch()
         row = QHBoxLayout()
-        self.account = _label("", "hint", wrap=False)
-        row.addWidget(self.account)
         row.addStretch()
         self.settings = QPushButton("Impostazioni")
         self.support = QPushButton("Assistenza")
@@ -84,8 +128,8 @@ class HomePage(QWidget):
         row.addWidget(self.support)
         layout.addLayout(row)
 
-    def refresh(self, login: tuple[str, str] | None) -> None:
-        self.account.setText(f"Account: {login[0]}@{login[1]}" if login else "Account: verrà chiesto alla prima firma")
+    def refresh(self, available: list[profiles.Profile], current: profiles.Profile | None) -> None:
+        self.bar.refresh(available, current)
 
 
 class OptionsPage(QWidget):
@@ -330,7 +374,8 @@ class MainWindow(QMainWindow):
         self.home.sign_pdf.clicked.connect(self.sign_pdf)
         self.home.sign_other.clicked.connect(self.sign_other)
         self.home.open_signed.clicked.connect(self.open_signed)
-        self.home.settings.clicked.connect(lambda: self.run_setup(first_run=False))
+        self.home.settings.clicked.connect(self.manage_profiles)
+        self.home.bar.chosen.connect(self.select_profile)
         self.home.support.clicked.connect(self.support)
         self.options.back.connect(self.go_home)
         self.options.confirm.connect(self.options_confirmed)
@@ -349,8 +394,10 @@ class MainWindow(QMainWindow):
         self.extracted: Path | None = None
         self.cancel_event: threading.Event | None = None
         self.pending: dict | None = None  # a signing run between the account check and the OTP
-        self.login: tuple[str, str] | None = None  # (username, domain) from the wallet, shown on the home page
-        self._load_login()
+        self.store: credentials.Store | None = None
+        self.profiles: list[profiles.Profile] = []
+        self.current: profiles.Profile | None = None  # the account that signs
+        self._load_profiles()
         self.go_home()
 
     # --- seams: everything that asks the user something (tests replace these) ---------------
@@ -361,13 +408,13 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getOpenFileName(self, title, str(Path.home()), filters)[0]
         return [path] if path else []
 
-    def ask_otp(self, count: int, failures: int, note: str = "") -> str | None:
-        dialog = OtpDialog(self, count, failures, note)
+    def ask_otp(self, count: int, failures: int, note: str = "", who: str = "") -> str | None:
+        dialog = OtpDialog(self, count, failures, note, who)
         return dialog.value() if dialog.exec() == OtpDialog.DialogCode.Accepted else None
 
-    def ask_login(self, need_user: bool, store_name: str | None):
+    def ask_login(self, need_user: bool, store_name: str | None, who: str = ""):
         """((user, domain) or None, password, remember), or None if cancelled."""
-        dialog = LoginDialog(self, need_user, store_name)
+        dialog = LoginDialog(self, need_user, store_name, who)
         if dialog.exec() != LoginDialog.DialogCode.Accepted:
             return None
         login, password, remember = dialog.value()
@@ -389,12 +436,22 @@ class MainWindow(QMainWindow):
     def show_error(self, title: str, text: str) -> None:
         QMessageBox.warning(self, title, text)
 
-    def run_setup(self, first_run: bool) -> bool:
-        dialog = SetupDialog(self, lambda: self.api, first_run, self.login)
-        accepted = dialog.exec() == SetupDialog.DialogCode.Accepted
-        self.login = dialog.login
-        self.home.refresh(self.login)
-        return accepted
+    def manage_profiles(self) -> None:
+        if self.store is None:
+            self.show_error("Portachiavi", "Su questo computer non c'è un portachiavi (KWallet o Secret Service): "
+                            "gli account non si possono salvare, nome utente e password verranno chiesti a ogni firma.")
+            return
+        dialog = ProfilesDialog(self, lambda: self.api, self.store, self.profiles)
+        dialog.exec()
+        self._set_profiles(dialog.profiles, profiles.by_id(dialog.profiles, self.current.id if self.current else None))
+
+    def add_first_profile(self) -> bool:
+        """No account saved yet: add one (checked with Aruba, no OTP). True if one was added."""
+        dialog = ProfileEditDialog(self, lambda: self.api, self.store, self.profiles)
+        if dialog.exec() != ProfileEditDialog.DialogCode.Accepted:
+            return False
+        self._set_profiles(dialog.profiles, dialog.profile)
+        return True
 
     def open_url(self, path: Path) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
@@ -408,14 +465,30 @@ class MainWindow(QMainWindow):
         return self._api
 
     def go_home(self) -> None:
-        self.home.refresh(self.login)
+        self.home.refresh(self.profiles, self.current)
         self.stack.setCurrentWidget(self.home)
 
-    def _load_login(self) -> None:
+    def _load_profiles(self) -> None:
         try:
-            self.login = credentials.stored_login()
+            self.store = credentials.get_store()
+            available = profiles.load_all(self.store) if self.store else []
         except credentials.CredentialStoreError as exc:
             log.info("portachiavi non disponibile all'avvio: %s", exc.message)
+            available = []
+        self._set_profiles(available, profiles.by_id(available, config.load().last_profile))
+
+    def _set_profiles(self, available: list[profiles.Profile], current: profiles.Profile | None) -> None:
+        self.profiles = available
+        self.current = current or (available[0] if available else None)
+        settings = config.load()
+        wanted = self.current.id if self.current else ""
+        if settings.last_profile != wanted:
+            settings.last_profile = wanted
+            config.save(settings)
+        self.home.refresh(self.profiles, self.current)
+
+    def select_profile(self, profile_id: str) -> None:
+        self._set_profiles(self.profiles, profiles.by_id(self.profiles, profile_id))
 
     def busy(self) -> bool:
         return any(not thread.isFinished() for thread, _ in self.__dict__.get("_running_workers", []))
@@ -482,23 +555,28 @@ class MainWindow(QMainWindow):
         self.sign([SignJob(p, Kind.PADES, spec) for p in self.paths])
 
     def credentials_for_signing(self):
-        """(user, domain, password, remember): from the wallet, asking only for what's missing."""
-        store = None
-        password = None
+        """(user, domain, password, remember, profile): from the wallet, asking only for what's missing."""
+        if self.store is None:  # nothing can be saved on this computer: ask for everything, remember nothing
+            answer = self.ask_login(need_user=True, store_name=None)
+            if answer is None:
+                return None
+            (user, domain), password, _ = answer
+            return user, domain, password, False, None
+        if not self.profiles and not self.add_first_profile():
+            return None
+        profile = self.current
         try:
-            store = credentials.get_store()
-            password = store.get(credentials.PASSWORD_KEY) if store else None
+            password = profiles.password(self.store, profile)
         except credentials.CredentialStoreError as exc:
             self.show_error("Portachiavi", exc.message)
-        login = self.login
-        if login and password:
-            return *login, password, False
-        answer = self.ask_login(need_user=login is None, store_name=store.name if store else None)
-        if answer is None:
-            return None
-        typed_login, password, remember = answer
-        user, domain = login or typed_login
-        return user, domain, password, bool(remember and store)
+            password = None
+        remember = False
+        if not password:
+            answer = self.ask_login(need_user=False, store_name=self.store.name, who=profile.alias)
+            if answer is None:
+                return None
+            _, password, remember = answer
+        return profile.user, profile.domain, password, remember, profile
 
     def sign(self, jobs: list[SignJob]) -> None:
         """Local checks, then the account check with Aruba (no OTP), then the OTP, then signing."""
@@ -509,9 +587,10 @@ class MainWindow(QMainWindow):
         found = self.credentials_for_signing()
         if found is None:
             return
-        user, domain, password, remember = found
+        user, domain, password, remember, profile = found
         settings = config.load()
-        self.pending = {"jobs": jobs, "password": password, "remember": remember, "user": user, "domain": domain}
+        self.pending = {"jobs": jobs, "password": password, "remember": remember, "profile": profile,
+                        "who": profile.alias if profile else f"{user}@{domain}"}
         self.progress.start("Controllo dell'account con Aruba...", total=None, cancellable=False)
         self.stack.setCurrentWidget(self.progress)
         job = worker.Worker(service.prepare_account, self.api, user, domain, password, settings)
@@ -520,19 +599,16 @@ class MainWindow(QMainWindow):
     def account_ready(self, result) -> None:
         account, signer = result
         pending, self.pending = self.pending, None
-        if pending["remember"]:  # Aruba has just accepted them: now they may go into the wallet
+        if pending["remember"] and pending["profile"] and self.store:  # Aruba accepted it: it may go into the wallet
             try:
-                store = credentials.get_store()
-                if store is not None:
-                    credentials.save_account(store, pending["user"], pending["domain"], pending["password"])
-                    self.login = (pending["user"], pending["domain"])
+                profiles.set_password(self.store, pending["profile"], pending["password"])
             except credentials.CredentialStoreError as exc:
-                log.warning("credenziali non salvate: %s", exc.message)
+                log.warning("password non salvata: %s", exc.message)
         note = ""
         if signer.not_after - dt.datetime.now(dt.timezone.utc) < dt.timedelta(days=60):
             note = f"Attenzione: il certificato di firma scade il {signer.not_after.astimezone():%d/%m/%Y}."
         jobs = pending["jobs"]
-        otp = self.ask_otp(len(jobs), service.auth_failures(), note)
+        otp = self.ask_otp(len(jobs), service.auth_failures(), note, pending["who"])
         if otp is None:
             self.go_home()
             return
@@ -607,11 +683,7 @@ class MainWindow(QMainWindow):
     def support(self) -> None:
         self.progress.start("Controllo in corso...", total=None, cancellable=False)
         self.stack.setCurrentWidget(self.progress)
-        try:
-            password = credentials.stored_password()
-        except credentials.CredentialStoreError:
-            password = None
-        job = worker.Worker(diagnostics.report, self.api, password, check_account=password is not None)
+        job = worker.Worker(diagnostics.report, self.api, check_credentials=True)
         worker.start(self, job, self.support_done, self.verify_failed)
 
     def support_done(self, lines) -> None:

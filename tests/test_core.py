@@ -49,7 +49,8 @@ def test_settings_roundtrip_private(tmp_path):
 
 
 def test_settings_hold_no_personal_data():
-    assert set(config.Settings.__dataclass_fields__) == {"type_hsm", "stamp", "stamp_page", "stamp_position"}
+    # last_profile is a random id, never an alias or a username
+    assert set(config.Settings.__dataclass_fields__) == {"type_hsm", "stamp", "stamp_page", "stamp_position", "last_profile"}
 
 
 def test_settings_ignore_unknown_keys_and_rewrite_only_preferences():
@@ -84,7 +85,6 @@ def test_secret_service_store(memory_keyring, monkeypatch):
     assert store.get(key) is None
     store.set(key, "Pw-segreta")
     assert memory_keyring.data[("firma-remota", "password")] == "Pw-segreta"
-    assert credentials.stored_password() == "Pw-segreta"
     assert store.get(key) == "Pw-segreta"
     store.delete(key)
     store.delete(key)  # deleting twice is fine

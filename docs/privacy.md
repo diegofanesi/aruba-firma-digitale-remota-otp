@@ -4,8 +4,9 @@ The app keeps as little as possible: nothing personal is written to disk.
 
 | What | Where | Protection |
 |---|---|---|
-| Username and signing domain (`utente@dominio`) | system wallet (KWallet on KDE, otherwise the Secret Service), folder/service `firma-remota`, entry `utente` | stored as the entry's encrypted **value**, with the same protection as the password (KWallet: Blowfish or GPG; GNOME Keyring: AES-128). The entry name says nothing about the user. |
-| Aruba password | same wallet, entry `password` | the wallet's encryption. |
+| Accounts: for each one an alias chosen by the user, username and signing domain | system wallet (KWallet on KDE, otherwise the Secret Service), folder/service `firma-remota`, entry `profili` | one JSON list stored as the entry's encrypted **value**, with the same protection as the passwords (KWallet: Blowfish or GPG; GNOME Keyring: AES-128). The entry name says nothing about the users. |
+| Aruba passwords | same wallet, one entry per account named `password:<random id>` | the wallet's encryption; the id is random, not derived from the username. |
+| Which account was used last | `~/.config/firma-remota/config.ini` | the random id only, never the alias or the username. |
 | Certificate ID, holder name, certificate expiry | **nowhere** | fetched from Aruba with `listCert` (password only, no OTP) at the start of each signing; this also proves the password is right before an OTP is asked for, and stays correct when the certificate is renewed. |
 | OTP codes, session ids | nowhere | kept in memory for one batch only. |
 | Preferences (stamp position, page) | `~/.config/firma-remota/config.ini` | nothing personal; mode 0600. |
@@ -18,11 +19,15 @@ Nothing is stored at all: username and password are asked at every signing. A mi
 is then checked by Aruba (`listCert`) and counts as one refused login.
 
 ## Choosing what to remember
-- `firma configura` (or *Impostazioni* in the GUI) asks whether to remember username and password;
-  answering no removes anything previously saved.
-- `firma configura --dimentica-password` removes the password; `--dimentica-tutto` removes both.
-- In the GUI, the first signature asks for username and password ("Ricorda" is ticked by default);
-  they reach the wallet only after Aruba has accepted them.
+- `firma configura` (or *Impostazioni* in the GUI) adds or edits an account and asks whether to
+  remember its password; the account itself (alias and username) is always kept in the wallet.
+- `firma configura --dimentica-password` forgets one password, `--rimuovi` one account,
+  `--dimentica-tutto` every account (all take `--account ALIAS` when there are several).
+- In the GUI, a missing password is asked at the first signature ("Ricorda" is ticked by default)
+  and reaches the wallet only after Aruba has accepted it. With no account saved, the first
+  signature opens the "Nuovo account" dialog.
+- Older versions kept a single account in the entries `utente` and `password`; it becomes a
+  profile (alias = username) the first time the new version reads the wallet.
 
 ## Not covered
 - **Signed documents** contain the signer's certificate (name, tax code): that is what a digital

@@ -1,7 +1,7 @@
-"""Password storage: KWallet on KDE, otherwise the freedesktop Secret Service.
+"""The password store: KWallet on KDE, otherwise the freedesktop Secret Service.
 
-Passwords are never written anywhere else. When no store is available the caller asks the
-user every time. The OTP is never stored.
+Accounts and passwords are never written anywhere else (see profiles.py for the layout). When
+no store is available the caller asks the user every time. The OTP is never stored.
 """
 
 from __future__ import annotations
@@ -17,8 +17,9 @@ SERVICE = "firma-remota"  # Secret Service "service" / KWallet folder
 OPEN_TIMEOUT = 120  # seconds: opening the wallet may show an unlock or "allow access" prompt
 
 
-# Fixed, anonymous entry names: the username is stored as a secret *value*, never in a name or
-# attribute (Secret Service attributes are not always encrypted). Nothing else is kept anywhere.
+# Entry names are fixed or random, never personal: usernames are stored as secret *values*
+# (Secret Service attributes are not always encrypted). Current layout: see profiles.py.
+# These two names were the single-account layout of older versions; profiles.py migrates them.
 PASSWORD_KEY = "password"
 LOGIN_KEY = "utente"  # value: "username@domain"
 
@@ -185,37 +186,6 @@ def candidate_stores() -> list[Store]:
     on_kde = "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper().split(":")
     stores: list[Store] = [SecretServiceStore(), KWalletStore()]
     return stores[::-1] if on_kde else stores
-
-
-def stored_password(store: Store | None = None) -> str | None:
-    """The Aruba password saved in the wallet, or None (no wallet, or nothing saved)."""
-    store = store or get_store()
-    return store.get(PASSWORD_KEY) if store else None
-
-
-def stored_login(store: Store | None = None) -> tuple[str, str] | None:
-    """(username, domain) saved in the wallet, or None."""
-    from .logsetup import register_personal
-
-    store = store or get_store()
-    login = store.get(LOGIN_KEY) if store else None
-    if not login:
-        return None
-    user, domain = split_login(login)
-    register_personal(login, user)
-    return user, domain
-
-
-def save_account(store: Store, user: str, domain: str, password: str) -> None:
-    store.set(LOGIN_KEY, f"{user}@{domain}")
-    store.set(PASSWORD_KEY, password)
-    if store.get(PASSWORD_KEY) != password or store.get(LOGIN_KEY) != f"{user}@{domain}":
-        raise CredentialStoreError("Il portachiavi non ha restituito i dati appena salvati.")
-
-
-def forget_account(store: Store) -> None:
-    store.delete(PASSWORD_KEY)
-    store.delete(LOGIN_KEY)
 
 
 def get_store() -> Store | None:
