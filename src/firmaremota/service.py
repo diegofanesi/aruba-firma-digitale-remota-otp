@@ -21,10 +21,11 @@ NOT_REACHED = "Non firmato: la firma si è interrotta per l'errore precedente."
 CANCELLED = "Non firmato: annullato."
 
 
-def account_from(settings: config.Settings) -> Account:
-    if not (settings.complete and settings.cert_id):
+def account_from(profile, settings: config.Settings) -> Account:
+    """ARSS account from the decrypted profile (vault.Profile) and the preferences."""
+    if not profile.complete:
         raise CredentialsError("Configurazione incompleta: esegui prima 'firma configura'.")
-    return Account(settings.user, settings.domain, settings.cert_id, settings.type_hsm)
+    return Account(profile.user, profile.domain, profile.cert_id, settings.type_hsm)
 
 
 def stamp_text(signer_name: str | None, extra: str = "") -> str:

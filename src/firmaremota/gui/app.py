@@ -10,7 +10,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from .. import logsetup
+from .. import logsetup, vault
 from .main_window import MainWindow
 
 log = logging.getLogger("firmaremota.gui")
@@ -64,6 +64,10 @@ def main(argv: list[str] | None = None) -> int:
         logsetup.setup()
     except OSError:
         pass
+    try:
+        vault.migrate_legacy()  # older versions kept account data in plain text
+    except Exception as exc:
+        log.warning("migrazione del profilo non riuscita: %s", exc)
     app = create_app(sys.argv[:1])
     window = MainWindow(make_api)
     _install_excepthook(window)

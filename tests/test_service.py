@@ -131,7 +131,10 @@ def test_fetch_signer_name():
     assert service.auth_failures() == 2
 
 
-def test_account_from_settings():
+def test_account_from_profile():
+    from firmaremota import vault
+
     with pytest.raises(CredentialsError, match="configura"):
-        service.account_from(config.Settings(user="a", domain="firma", cert_id=""))
-    assert service.account_from(config.Settings(user="a", domain="firma", cert_id="X")).cert_id == "X"
+        service.account_from(vault.Profile("a", "firma", ""), config.Settings())
+    account = service.account_from(vault.Profile("a", "firma", "X"), config.Settings(type_hsm="COSIGN"))
+    assert (account.user, account.domain, account.cert_id, account.type_hsm) == ("a", "firma", "X", "COSIGN")

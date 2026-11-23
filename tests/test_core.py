@@ -41,19 +41,26 @@ def memory_keyring():
 
 
 def test_settings_roundtrip_private(tmp_path):
-    settings = config.Settings(user="mario.rossi", domain="firma", cert_id="NEW_2025:abc-AS0")
+    settings = config.Settings(stamp="si", stamp_page="3", stamp_position="alto-destra")
     path = config.save(settings)
     assert path == tmp_path / "config" / "firma-remota" / "config.ini"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert config.load() == settings
-    assert config.load().complete
 
 
-def test_settings_ignore_unknown_keys(tmp_path):
+def test_settings_hold_no_personal_data():
+    assert set(config.Settings.__dataclass_fields__) == {"type_hsm", "stamp", "stamp_page", "stamp_position"}
+
+
+def test_settings_ignore_unknown_keys_and_drop_legacy_section():
     path = config.config_path()
     path.parent.mkdir(parents=True)
-    path.write_text("[account]\nuser = a\ndomain = firma\nvecchia_opzione = 1\n")
-    assert config.load() == config.Settings(user="a", domain="firma")
+    path.write_text("[account]\nuser = a\ndomain = firma\n[preferenze]\nstamp = si\nvecchia_opzione = 1\n")
+    assert config.load() == config.Settings(stamp="si")
+    assert config.legacy_account() == {"user": "a", "domain": "firma", "cert_id": "", "signer_name": "",
+                                       "cert_expires": ""}
+    config.save(config.load())
+    assert config.legacy_account() is None and "user" not in path.read_text()
 
 
 def test_state_roundtrip_and_corruption():
@@ -75,10 +82,11 @@ def test_secret_service_store(memory_keyring, monkeypatch):
     monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
     store = credentials.get_store()
     assert isinstance(store, credentials.SecretServiceStore)
-    key = credentials.account_key("mario.rossi", "firma")
+    key = credentials.PASSWORD_KEY
     assert store.get(key) is None
     store.set(key, "Pw-segreta")
-    assert memory_keyring.data[("firma-remota", "mario.rossi@firma")] == "Pw-segreta"
+    assert memory_keyring.data[("firma-remota", "account")] == "Pw-segreta"
+    assert credentials.stored_password() == "Pw-segreta"
     assert store.get(key) == "Pw-segreta"
     store.delete(key)
     store.delete(key)  # deleting twice is fine

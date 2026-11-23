@@ -12,19 +12,19 @@ from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import QDropEvent  # noqa: E402
 from PySide6.QtWidgets import QDialog  # noqa: E402
 
-from firmaremota import config, credentials, verify  # noqa: E402
+from firmaremota import config, credentials, vault, verify  # noqa: E402
 from firmaremota.arss.client import MSG_OTP  # noqa: E402
 from firmaremota.errors import CredentialsError, OtpError, ServiceError  # noqa: E402
 from firmaremota.gui.dialogs import OtpDialog, SetupDialog  # noqa: E402
 from firmaremota.gui.main_window import MainWindow  # noqa: E402
 from firmaremota.models import Kind, Position  # noqa: E402
 
+from .conftest import PASSWORD, PROFILE  # noqa: E402
 from .fakes import FakeArss, signer_info  # noqa: E402
-from .test_cli_setup import MemoryStore  # noqa: E402
 from .test_verify import PDF, RootsTrust  # noqa: E402
 
 A4 = (595, 842, 0, None)
-KEY = "mario.rossi@firma"
+KEY = credentials.PASSWORD_KEY
 
 
 class Recorder:
@@ -37,10 +37,8 @@ class Recorder:
 
 
 @pytest.fixture
-def store(monkeypatch):
-    memory = MemoryStore({KEY: "pw-salvata"})
-    monkeypatch.setattr(credentials, "get_store", lambda: memory)
-    return memory
+def store(configured):
+    return configured
 
 
 @pytest.fixture
@@ -50,7 +48,6 @@ def api(make_p7m):
 
 @pytest.fixture
 def window(qtbot, store, api):
-    config.save(config.Settings(user="mario.rossi", domain="firma", cert_id="NEW_2025:abc-AS0", signer_name="Mario Rossi"))
     w = MainWindow(lambda: api)
     qtbot.addWidget(w)
     w.ask_otp = Recorder("12345678")
@@ -142,7 +139,7 @@ def test_partial_batch_and_retry(window, api, qtbot, tmp_path, make_pdf):
 
 def test_password_asked_and_saved_only_after_success(window, store, api, qtbot, tmp_path, make_pdf):
     store.data.clear()
-    window.ask_password = Recorder(("pw-nuova", True))
+    window.ask_password = Recorder((PASSWORD, True))
     api.open_error = OtpError(MSG_OTP)
     paths = pdfs(tmp_path, make_pdf, "a.pdf")
     window.prepare_sign(paths, Kind.PADES)
@@ -153,7 +150,24 @@ def test_password_asked_and_saved_only_after_success(window, store, api, qtbot, 
     window.prepare_sign(paths, Kind.PADES)
     window.options.sign.click()
     wait_for(qtbot, window, window.result)
-    assert store.data == {KEY: "pw-nuova"}
+    assert store.data == {KEY: PASSWORD}
+
+
+def test_wrong_typed_password_never_reaches_aruba(window, store, api, tmp_path, make_pdf):
+    store.data.clear()
+    window.ask_password = Recorder(("sbagliata", True))
+    window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
+    window.options.sign.click()
+    assert "La password non apre il profilo" in window.show_error.calls[0][1]
+    assert api.calls == [] and window.ask_otp.calls == [] and store.data == {}
+
+
+def test_home_shows_account_from_encrypted_profile(window, qtbot, store, api):
+    assert window.home.account.text() == "Account: mario.rossi@firma"
+    store.data.clear()
+    locked = MainWindow(lambda: api)
+    qtbot.addWidget(locked)
+    assert locked.home.account.text() == "Account configurato"
 
 
 def test_open_signed_p7m_and_extract(window, qtbot, tmp_path, make_p7m, pki, monkeypatch):
@@ -194,6 +208,7 @@ def test_drop_a_pdf_asks_what_to_do(window, tmp_path, make_pdf):
 
 
 def test_first_run_opens_setup(qtbot, store, api, tmp_path, make_pdf):
+    vault.delete()
     w = MainWindow(lambda: api)
     qtbot.addWidget(w)
     w.run_setup = Recorder(False)
@@ -223,6 +238,7 @@ def test_otp_dialog_validation(qtbot):
 
 def test_setup_dialog_saves_after_aruba_accepts(qtbot, store, api):
     store.data.clear()
+    vault.delete()
     dialog = SetupDialog(None, lambda: api, first_run=True)
     qtbot.addWidget(dialog)
     dialog.user.setText("mario.rossi@firma")
@@ -230,13 +246,15 @@ def test_setup_dialog_saves_after_aruba_accepts(qtbot, store, api):
     dialog.password.setText("Pw-1")
     dialog.check.click()
     qtbot.waitUntil(lambda: dialog.result() == QDialog.DialogCode.Accepted, timeout=10000)
-    settings = config.load()
-    assert (settings.user, settings.domain, settings.cert_id, settings.signer_name) == \
+    profile = vault.load("Pw-1")
+    assert (profile.user, profile.domain, profile.cert_id, profile.signer_name) == \
         ("mario.rossi", "firma", "NEW_2025:abc-AS0", "Mario Rossi")
+    assert dialog.profile == profile
     assert store.data == {KEY: "Pw-1"} and api.calls == [("list_certs", "Pw-1")]
 
 
 def test_setup_dialog_refused(qtbot, store, api):
+    vault.delete()
     api.certs = CredentialsError("Nome utente, dominio o password non accettati.")
     dialog = SetupDialog(None, lambda: api, first_run=True)
     qtbot.addWidget(dialog)
@@ -244,7 +262,7 @@ def test_setup_dialog_refused(qtbot, store, api):
     dialog.password.setText("sbagliata")
     dialog.check.click()
     qtbot.waitUntil(lambda: "non accettati" in dialog.status.text(), timeout=10000)
-    assert dialog.result() != QDialog.DialogCode.Accepted and not config.load().complete
+    assert dialog.result() != QDialog.DialogCode.Accepted and not vault.exists()
     assert dialog.check.isEnabled()
 
 
@@ -253,7 +271,7 @@ def test_support_report(window, qtbot):
     window.home.support.click()
     qtbot.waitUntil(lambda: bool(window.show_support.calls), timeout=10000)
     text = window.show_support.calls[0][0]
-    assert "Account: mario.rossi@firma" in text and "pw-salvata" not in text
+    assert "Account: mario.rossi@firma" in text and PASSWORD not in text
 
 
 def test_startup_smoke_test(tmp_path):

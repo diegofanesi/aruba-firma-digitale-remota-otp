@@ -30,37 +30,41 @@ def config_path() -> Path:
     return config_dir() / "config.ini"
 
 
+_SECTION = "preferenze"
+# Before the encrypted profile existed, account data sat in plain text in an [account] section.
+_LEGACY_SECTION = "account"
+_LEGACY_FIELDS = ("user", "domain", "cert_id", "signer_name", "cert_expires")
+
+
 @dataclass
 class Settings:
-    user: str = ""
-    domain: str = ""  # ARSS typeOtpAuth
-    cert_id: str = "AS0"
+    """Non-personal preferences only. Account data lives in the encrypted profile (vault.py)."""
+
     type_hsm: str = "COSIGN"
-    signer_name: str = ""  # certificate holder, written in the visible stamp
-    cert_expires: str = ""  # ISO date, for expiry warnings
     stamp: str = "no"  # GUI: remember whether a visible stamp was wanted ("si"/"no")
     stamp_page: str = "ultima"  # "ultima", "prima" or a page number
     stamp_position: str = "basso-destra"
 
-    @property
-    def complete(self) -> bool:
-        return bool(self.user and self.domain)
+
+def _read(path: Path) -> configparser.ConfigParser:
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.read(path, encoding="utf-8")
+    return parser
 
 
 def load(path: Path | None = None) -> Settings:
-    path = path or config_path()
-    parser = configparser.ConfigParser(interpolation=None)
-    parser.read(path, encoding="utf-8")
-    section = parser["account"] if parser.has_section("account") else {}
+    parser = _read(path or config_path())
+    section = parser[_SECTION] if parser.has_section(_SECTION) else {}
     known = {f.name for f in fields(Settings)}
     return Settings(**{k: v for k, v in section.items() if k in known})
 
 
 def save(settings: Settings, path: Path | None = None) -> Path:
+    """Write the preferences. Any legacy plain-text account data in the file is dropped."""
     path = path or config_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     parser = configparser.ConfigParser(interpolation=None)
-    parser["account"] = {k: str(v) for k, v in asdict(settings).items()}
+    parser[_SECTION] = {k: str(v) for k, v in asdict(settings).items()}
     tmp = path.with_name(path.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -69,6 +73,15 @@ def save(settings: Settings, path: Path | None = None) -> Path:
         os.fsync(f.fileno())
     os.replace(tmp, path)
     return path
+
+
+def legacy_account(path: Path | None = None) -> dict[str, str] | None:
+    """Plain-text account data left by older versions, if any."""
+    parser = _read(path or config_path())
+    if not parser.has_section(_LEGACY_SECTION):
+        return None
+    values = {k: parser[_LEGACY_SECTION].get(k, "") for k in _LEGACY_FIELDS}
+    return values if values["user"] and values["domain"] else None
 
 
 @dataclass

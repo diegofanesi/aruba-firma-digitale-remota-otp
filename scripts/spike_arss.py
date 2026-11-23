@@ -21,6 +21,9 @@ Steps:
 Safety rules: every call that carries credentials asks for confirmation first, nothing is
 ever retried, and the first failed credentialed call stops the run unless you explicitly
 continue. Passwords and OTPs are redacted from everything written to spike-output/.
+
+PRIVACY: spike-output/ still holds personal data (your username in the requests, your
+certificate inside the signed test files). Delete it as soon as you have read the results.
 """
 
 from __future__ import annotations

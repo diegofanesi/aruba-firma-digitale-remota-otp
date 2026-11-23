@@ -18,7 +18,7 @@ from cryptography.x509.oid import NameOID, ObjectIdentifier
 from pypdf import PdfWriter
 from pypdf.generic import RectangleObject
 
-from firmaremota import logsetup
+from firmaremota import logsetup, vault
 
 FIXTURES = Path(__file__).parent / "fixtures"
 # QCStatements with a single QcCompliance (0.4.0.1862.1.1) statement: marks a qualified certificate.
@@ -32,6 +32,7 @@ def isolated_dirs(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setattr(logsetup, "_secrets", set())
+    monkeypatch.setattr(vault, "SCRYPT_N", 2**10)  # fast key derivation in tests (production: 2**15)
 
 
 def _name(cn: str, *extra: x509.NameAttribute) -> x509.Name:
@@ -158,3 +159,37 @@ def sign_pdf(pki):
         return out.getvalue()
 
     return sign
+
+
+PASSWORD = "pw-salvata"
+PROFILE = vault.Profile("mario.rossi", "firma", "NEW_2025:abc-AS0", "Mario Rossi",
+                        (dt.date.today() + dt.timedelta(days=400)).isoformat())
+
+
+class MemoryStore:
+    """Stand-in for KWallet / Secret Service."""
+
+    name = "Portachiavi di prova"
+
+    def __init__(self, data=None):
+        self.data = dict(data or {})
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def set(self, key, value):
+        self.data[key] = value
+
+    def delete(self, key):
+        self.data.pop(key, None)
+
+
+@pytest.fixture
+def configured(monkeypatch):
+    """An encrypted profile for Mario Rossi, with its password saved in a fake wallet."""
+    from firmaremota import credentials
+
+    vault.save(PROFILE, PASSWORD)
+    store = MemoryStore({credentials.PASSWORD_KEY: PASSWORD})
+    monkeypatch.setattr(credentials, "get_store", lambda: store)
+    return store

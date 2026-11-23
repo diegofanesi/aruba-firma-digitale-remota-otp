@@ -62,27 +62,19 @@ def test_no_command_shows_help(capsys):
 
 # --- signing and verification ------------------------------------------------------------------
 
-from firmaremota import config, credentials  # noqa: E402
+from firmaremota import config  # noqa: E402
 from firmaremota.arss.client import MSG_OTP  # noqa: E402
 from firmaremota.errors import OtpError, ServiceError  # noqa: E402
 
-from .fakes import FakeArss, signer_info  # noqa: E402
+from .conftest import PASSWORD  # noqa: E402
+from .fakes import FakeArss  # noqa: E402
 from .test_verify import RootsTrust  # noqa: E402
 
 A4 = (595, 842, 0, None)
 
 
 @pytest.fixture
-def api(monkeypatch, make_p7m):
-    config.save(config.Settings(user="mario.rossi", domain="firma", cert_id="NEW_2025:abc-AS0", signer_name="Mario Rossi"))
-
-    class Store:
-        name = "finto"
-
-        def get(self, key):
-            return "pw-dal-portachiavi"
-
-    monkeypatch.setattr(credentials, "get_store", lambda: Store())
+def api(monkeypatch, make_p7m, configured):
     fake = FakeArss(make_p7m=make_p7m)
     monkeypatch.setattr(cli, "make_api", lambda: fake)
     return fake
@@ -128,15 +120,19 @@ def test_stamp_text_and_page(api, tmp_path, make_pdf, monkeypatch):
     assert text == "Firmato digitalmente da Mario Rossi\nVisto"
 
 
-def test_signer_name_fetched_once(api, tmp_path, make_pdf, monkeypatch):
-    config.save(config.Settings(user="mario.rossi", domain="firma", cert_id="NEW_2025:abc-AS0"))
-    api.certs = [("NEW_2025:abc-AS0", signer_info("Mario Rossi"))]
+def test_typed_password_is_checked_locally(api, configured, tmp_path, make_pdf, monkeypatch, capsys):
+    """No saved password: a wrong one is caught by the encrypted profile, Aruba is never contacted."""
+    configured.data.clear()
     (tmp_path / "a.pdf").write_bytes(make_pdf(A4))
-    answers(monkeypatch, "12345678", "12345679")
-    assert cli.main(["pdf", "--timbro", str(tmp_path / "a.pdf")]) == 0
-    assert config.load().signer_name == "Mario Rossi"
-    assert cli.main(["pdf", "--timbro", str(tmp_path / "a.pdf")]) == 0
-    assert api.names().count("list_certs") == 1
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "sbagliata")
+    asked = answers(monkeypatch)
+    assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 3
+    assert "La password non apre il profilo" in capsys.readouterr().err
+    assert api.calls == [] and asked == [] and config.load_state().auth_failures == 0
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": PASSWORD)
+    answers(monkeypatch, "12345678")
+    assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 0
 
 
 def test_local_problems_ask_for_nothing(api, tmp_path, make_pdf, monkeypatch, capsys):

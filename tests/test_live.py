@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from firmaremota import config, credentials, p7m, service, verify
+from firmaremota import config, credentials, p7m, service, vault, verify
 from firmaremota.arss.client import ArssClient
 from firmaremota.models import Kind, SignJob, StampSpec
 
@@ -19,14 +19,13 @@ pytestmark = [
     pytest.mark.skipif(os.environ.get("FIRMA_LIVE") != "1", reason="live test: set FIRMA_LIVE=1 and FIRMA_OTP"),
 ]
 REAL_CONFIG = Path.home() / ".config" / "firma-remota" / "config.ini"
+REAL_PROFILE = Path.home() / ".config" / "firma-remota" / "profilo.enc"
 
 
 def test_one_session_signs_and_verifies_everything(tmp_path, make_pdf):
-    settings = config.load(REAL_CONFIG)
-    account = service.account_from(settings)
-    store = credentials.get_store()
-    password = store.get(credentials.account_key(settings.user, settings.domain))
-    assert password, "no password in the wallet: run the setup first"
+    password = credentials.stored_password()
+    assert password, "no password in the wallet: run 'firma configura' first"
+    account = service.account_from(vault.load(password, REAL_PROFILE), config.load(REAL_CONFIG))
     out = Path(os.environ.get("FIRMA_LIVE_DIR") or tmp_path / "firmati")
     out.mkdir(parents=True, exist_ok=True)
 

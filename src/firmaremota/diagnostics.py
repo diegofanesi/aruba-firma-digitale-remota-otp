@@ -8,7 +8,7 @@ import platform
 from dataclasses import dataclass
 from importlib import metadata
 
-from . import __version__, config, credentials, logsetup, service, trustlist
+from . import __version__, config, credentials, logsetup, service, trustlist, vault
 from .errors import FirmaError
 
 OK, WARNING, ERROR, INFO = "ok", "avviso", "errore", "info"
@@ -47,32 +47,37 @@ def _system() -> list[Line]:
     ]
 
 
-def _account(settings: config.Settings) -> list[Line]:
-    if not settings.complete:
-        return [Line(ERROR, "Account", "non configurato: esegui 'firma configura'")]
-    lines = [Line(OK if settings.cert_id else ERROR, "Account",
-                  f"{settings.user}@{settings.domain}" + ("" if settings.cert_id else ", certificato non scelto: esegui 'firma configura'"))]
-    if settings.cert_expires:
-        expires = dt.date.fromisoformat(settings.cert_expires)
+def _account(password: str | None) -> tuple[list[Line], vault.Profile | None]:
+    if not vault.exists():
+        return [Line(ERROR, "Account", "non configurato: esegui 'firma configura'")], None
+    if password is None:
+        return [Line(INFO, "Account", "profilo cifrato presente (si apre con la password Aruba)")], None
+    try:
+        profile = vault.load(password)
+    except vault.VaultError as exc:
+        return [Line(ERROR, "Account", exc.message)], None
+    lines = [Line(OK if profile.complete else ERROR, "Account",
+                  f"{profile.login}, dati cifrati con AES-256" if profile.complete
+                  else "certificato non scelto: esegui 'firma configura'")]
+    if profile.cert_expires:
+        expires = dt.date.fromisoformat(profile.cert_expires)
         left = expires - dt.date.today()
-        who = f"di {settings.signer_name}, " if settings.signer_name else ""
+        who = f"di {profile.signer_name}, " if profile.signer_name else ""
         if left.days < 0:
             lines.append(Line(ERROR, "Certificato", f"{who}scaduto il {expires:%d/%m/%Y}: va rinnovato"))
         elif left < EXPIRY_WARNING:
             lines.append(Line(WARNING, "Certificato", f"{who}scade il {expires:%d/%m/%Y}: rinnovalo per tempo"))
         else:
             lines.append(Line(OK, "Certificato", f"{who}valido fino al {expires:%d/%m/%Y}"))
-    return lines
+    return lines, profile
 
 
-def _password(settings: config.Settings) -> list[Line]:
+def _password() -> list[Line]:
     try:
         store = credentials.get_store()
         if store is None:
             return [Line(WARNING, "Password", "nessun portachiavi disponibile: verrà chiesta ogni volta")]
-        if not settings.complete:
-            return [Line(INFO, "Portachiavi", store.name)]
-        saved = store.get(credentials.account_key(settings.user, settings.domain)) is not None
+        saved = store.get(credentials.PASSWORD_KEY) is not None
     except credentials.CredentialStoreError as exc:
         return [Line(ERROR, "Portachiavi", exc.message)]
     if saved:
@@ -103,20 +108,20 @@ def _trust_list() -> list[Line]:
     return [Line(status, "Elenco certificatori", f"scaricato il {fetched.astimezone():%d/%m/%Y}")]
 
 
-def _credentials_check(api, settings: config.Settings, password: str) -> list[Line]:
+def _credentials_check(api, profile: vault.Profile, password: str) -> list[Line]:
     try:
-        certs = service.check_credentials(api, service.account_from(settings), password)
+        certs = service.check_credentials(api, service.account_from(profile, config.load()), password)
     except FirmaError as exc:
         return [Line(ERROR, "Credenziali", exc.message)]
     return [Line(OK, "Credenziali", f"accettate da Aruba ({len(certs)} certificato/i)")]
 
 
-def report(api, password: str | None = None) -> list[Line]:
-    """All checks; with `password` it also asks Aruba to accept the credentials (no OTP)."""
-    settings = config.load()
-    lines = _system() + _account(settings) + _password(settings) + _failures() + _service(api) + _trust_list()
-    if password is not None and settings.complete and settings.cert_id:
-        lines += _credentials_check(api, settings, password)
+def report(api, password: str | None = None, check_account: bool = False) -> list[Line]:
+    """All checks. `password` opens the encrypted profile; `check_account` also asks Aruba (no OTP)."""
+    account_lines, profile = _account(password)
+    lines = _system() + account_lines + _password() + _failures() + _service(api) + _trust_list()
+    if check_account and profile is not None and profile.complete:
+        lines += _credentials_check(api, profile, password)
     lines.append(Line(INFO, "Registro", str(logsetup.log_path())))
     return lines
 

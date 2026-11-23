@@ -14,12 +14,12 @@ SERVICE = "firma-remota"  # Secret Service "service" / KWallet folder
 OPEN_TIMEOUT = 120  # seconds: opening the wallet may show an unlock or "allow access" prompt
 
 
-def account_key(user: str, domain: str) -> str:
+PASSWORD_KEY = "account"  # fixed and anonymous: the entry's name doesn't reveal the username
+
+
+def legacy_key(user: str, domain: str) -> str:
+    """Entry name used by older versions ("utente@dominio")."""
     return f"{user}@{domain}"
-
-
-def tsa_key(user: str) -> str:
-    return f"tsa:{user}"
 
 
 class CredentialStoreError(Exception):
@@ -168,6 +168,12 @@ def candidate_stores() -> list[Store]:
     on_kde = "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper().split(":")
     stores: list[Store] = [SecretServiceStore(), KWalletStore()]
     return stores[::-1] if on_kde else stores
+
+
+def stored_password() -> str | None:
+    """The Aruba password saved in the wallet, or None (no wallet, or nothing saved)."""
+    store = get_store()
+    return store.get(PASSWORD_KEY) if store else None
 
 
 def get_store() -> Store | None:

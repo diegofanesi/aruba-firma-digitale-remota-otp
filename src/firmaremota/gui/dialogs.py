@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QVBoxLayout,
 )
 
-from .. import config, credentials, service
+from .. import config, credentials, service, vault
 from ..errors import FirmaError
 from ..models import Account
 from . import worker
@@ -78,11 +78,11 @@ class OtpDialog(QDialog):
 
 
 class PasswordDialog(QDialog):
-    def __init__(self, parent, user: str, store_name: str | None):
+    def __init__(self, parent, store_name: str | None):
         super().__init__(parent)
         self.setWindowTitle("Password Aruba")
         layout = QVBoxLayout(self)
-        layout.addWidget(_label(f"Scrivi la password Aruba di <b>{user}</b>."))
+        layout.addWidget(_label("Scrivi la password del tuo account di firma Aruba."))
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         layout.addWidget(self.password)
@@ -104,11 +104,11 @@ class PasswordDialog(QDialog):
 class SetupDialog(QDialog):
     """Account, domain and password; checked with Aruba (no OTP) before anything is saved."""
 
-    def __init__(self, parent, api_factory, first_run: bool):
+    def __init__(self, parent, api_factory, first_run: bool, current: vault.Profile | None = None):
         super().__init__(parent)
         self.api_factory = api_factory
-        self.settings = config.load()
         self.store = credentials.get_store()
+        self.profile: vault.Profile | None = None  # set when saved
         self.setWindowTitle("Benvenuto" if first_run else "Impostazioni")
         self.setMinimumWidth(720)
         layout = QVBoxLayout(self)
@@ -116,10 +116,10 @@ class SetupDialog(QDialog):
                  if first_run else "Dati dell'account di firma remota Aruba.")
         layout.addWidget(_label(intro))
         form = QFormLayout()
-        self.user = QLineEdit(self.settings.user)
+        self.user = QLineEdit(current.user if current else "")
         self.user.setPlaceholderText("nome.cognome oppure nome.cognome@firma")
         self.user.editingFinished.connect(self._split_domain)
-        self.domain = QLineEdit(self.settings.domain or "firma")
+        self.domain = QLineEdit(current.domain if current else "firma")
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         form.addRow("Nome utente:", self.user)
@@ -141,7 +141,7 @@ class SetupDialog(QDialog):
         row = QHBoxLayout()
         self.forget = QPushButton("Dimentica la password salvata")
         self.forget.clicked.connect(self._forget)
-        self.forget.setVisible(bool(self.store and self.settings.complete and not first_run))
+        self.forget.setVisible(bool(self.store and vault.exists() and not first_run))
         row.addWidget(self.forget)
         row.addStretch()
         self.cancel = QPushButton("Annulla")
@@ -195,25 +195,26 @@ class SetupDialog(QDialog):
             self._set_busy(False)
             return
         cert_id, signer = chosen
+        profile = vault.Profile(user, domain, cert_id, signer.name, signer.not_after.date().isoformat())
         try:
-            old_key = credentials.account_key(self.settings.user, self.settings.domain) if self.settings.complete else None
-            new_key = credentials.account_key(user, domain)
-            if self.remember is not None and self.remember.isChecked():
-                self.store.set(new_key, password)
-                if old_key and old_key != new_key:
-                    self.store.delete(old_key)
-        except credentials.CredentialStoreError as exc:
-            self._set_busy(False, exc.message, WARNING_STYLE)
+            vault.save(profile, password)
+            if self.store is not None:
+                if self.remember is not None and self.remember.isChecked():
+                    self.store.set(credentials.PASSWORD_KEY, password)
+                else:
+                    self.store.delete(credentials.PASSWORD_KEY)  # an older one would no longer open the profile
+                self.store.delete(credentials.legacy_key(user, domain))
+        except (credentials.CredentialStoreError, OSError) as exc:
+            self._set_busy(False, getattr(exc, "message", str(exc)), WARNING_STYLE)
             return
-        self.settings.user, self.settings.domain, self.settings.cert_id = user, domain, cert_id
-        self.settings.signer_name = signer.name
-        self.settings.cert_expires = signer.not_after.date().isoformat()
-        config.save(self.settings)
+        config.save(config.load())  # drops plain-text account data left by older versions
+        vault.register_personal(profile)
+        self.profile = profile
         self.accept()
 
     def _forget(self) -> None:
         try:
-            self.store.delete(credentials.account_key(self.settings.user, self.settings.domain))
+            self.store.delete(credentials.PASSWORD_KEY)
             self._set_busy(False, "Password dimenticata: verrà chiesta alla prossima firma.")
         except credentials.CredentialStoreError as exc:
             self._set_busy(False, exc.message, WARNING_STYLE)
