@@ -105,7 +105,7 @@ def write_private(path: Path, data: bytes) -> None:
         f.write(data)
 
 
-def make_test_pdf(label: str) -> bytes:
+def make_test_pdf(label: str, rotate: int = 0) -> bytes:
     """Two-page A4 PDF; each page shows its number and the target stamp rectangle."""
     x1, y1, x2, y2 = STAMP_RECT
 
@@ -126,7 +126,7 @@ def make_test_pdf(label: str) -> bytes:
         content = page_content(n)
         content_obj = len(objects) + 2
         objects.append(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] {f'/Rotate {rotate} ' if rotate else ''}"
             f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_obj} 0 R >>".encode()
         )
         objects.append(b"<< /Length %d >>\nstream\n" % len(content) + content + b"endstream")
