@@ -7,7 +7,7 @@
 | OTP codes, session ids | nowhere | kept in memory for one batch only. |
 | Preferences (stamp position, page) | `~/.config/firma-remota/config.ini` | nothing personal; mode 0600. |
 | Consecutive refused logins | `~/.local/state/firma-remota/state.json` | a number. |
-| Log | `~/.local/state/firma-remota/firma.log` (folder 0700, file 0600) | password, OTP, session id, username and holder name are masked. File names do appear. |
+| Log | `~/.local/state/firma-remota/firma.log` (folder 0700, file 0600) | secrets (password, OTP, session id) fully replaced by `***`; personal data (username, holder name, file names, folders) keeps only the first and last letter, e.g. `M*********i`, `C*******o.pdf` (extension kept). Applied by the log formatter, so it also covers error messages and tracebacks. |
 | Official trusted lists | `~/.cache/firma-remota/trustlist/` | public data. |
 
 ## Behaviour

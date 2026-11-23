@@ -27,6 +27,7 @@ from pyhanko_certvalidator.fetchers.requests_fetchers import RequestsFetcherBack
 
 from . import p7m, trustlist
 from .errors import FileError
+from .logsetup import register_paths
 from .models import Kind, SignatureCheck, VerifyReport
 
 log = logging.getLogger("firmaremota.verify")
@@ -166,6 +167,7 @@ def verify_bytes(name: str, data: bytes, trust: Trust | None = None) -> VerifyRe
 
 
 def verify_file(path: Path, trust: Trust | None = None) -> VerifyReport:
+    register_paths(path, Path(path).parent)
     try:
         data = Path(path).read_bytes()
     except OSError as exc:

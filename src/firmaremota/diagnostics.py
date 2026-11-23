@@ -57,12 +57,12 @@ def _account(password: str | None) -> tuple[list[Line], vault.Profile | None]:
     except vault.VaultError as exc:
         return [Line(ERROR, "Account", exc.message)], None
     lines = [Line(OK if profile.complete else ERROR, "Account",
-                  f"{profile.login}, dati cifrati con AES-256" if profile.complete
+                  f"{logsetup.partial(profile.user)}@{profile.domain}, dati cifrati con AES-256" if profile.complete
                   else "certificato non scelto: esegui 'firma configura'")]
     if profile.cert_expires:
         expires = dt.date.fromisoformat(profile.cert_expires)
         left = expires - dt.date.today()
-        who = f"di {profile.signer_name}, " if profile.signer_name else ""
+        who = f"di {logsetup.partial(profile.signer_name)}, " if profile.signer_name else ""
         if left.days < 0:
             lines.append(Line(ERROR, "Certificato", f"{who}scaduto il {expires:%d/%m/%Y}: va rinnovato"))
         elif left < EXPIRY_WARNING:

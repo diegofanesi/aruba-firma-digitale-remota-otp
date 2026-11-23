@@ -284,13 +284,15 @@ def cmd_gui(args: argparse.Namespace) -> int:
 
 def cmd_estrai(args: argparse.Namespace) -> int:
     src = Path(args.file)
+    out_dir = Path(args.cartella) if args.cartella else src.resolve().parent
+    logsetup.register_paths(src, out_dir)
     data = _read(src)
     result = p7m.unwrap(data)
-    out_dir = Path(args.cartella) if args.cartella else src.resolve().parent
     problem = files.check_writable(out_dir)
     if problem:
         raise FirmaError(problem)
     out = files.write_new(out_dir, p7m.inner_name(src.name, result.content), result.content)
+    logsetup.register_paths(out)
     for depth, signers in enumerate(result.layers, start=1):
         label = "Firmato da" if len(result.layers) == 1 else f"Firma {depth} di {len(result.layers)}:"
         print(f"{label} {messages.signers_line(signers)}")

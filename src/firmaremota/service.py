@@ -10,7 +10,7 @@ from pathlib import Path
 from . import config, files, p7m, stamp
 from .arss.client import ArssApi
 from .errors import CredentialsError, FileError, FirmaError, OtpError, ServiceError
-from .logsetup import register_secret
+from .logsetup import register_paths, register_secret
 from .models import Account, AuthCtx, JobResult, Kind, SignerInfo, SignJob
 
 log = logging.getLogger("firmaremota.service")
@@ -41,6 +41,7 @@ def preflight(jobs: list[SignJob], out_dir: Path | None = None) -> list[str]:
     """Everything that can be checked locally, so an OTP is never spent on a batch bound to fail."""
     if not jobs:
         return ["Nessun file da firmare."]
+    register_paths(*(job.src for job in jobs), *(output_dir(job, out_dir) for job in jobs))
     problems: list[str] = []
     for job in jobs:
         name = job.src.name
@@ -122,7 +123,9 @@ def _sign_one(api: ArssApi, auth: AuthCtx, job: SignJob, out_dir: Path | None, s
         if not p7m.is_p7m(signed):
             raise ServiceError("Il servizio di firma ha restituito una busta .p7m non valida.")
         name = files.p7m_name(job.src)
-    return files.write_new(output_dir(job, out_dir), name, signed)
+    output = files.write_new(output_dir(job, out_dir), name, signed)
+    register_paths(output)
+    return output
 
 
 def sign_batch(
@@ -144,6 +147,7 @@ def sign_batch(
     batch and the remaining files are reported as not signed.
     """
     register_secret(password, otp)
+    register_paths(*(job.src for job in jobs), *(output_dir(job, out_dir) for job in jobs))
     try:
         session_id = api.open_session(AuthCtx(account, password, otp))
     except (OtpError, CredentialsError):

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from .. import config, credentials, diagnostics, files, messages, service, vault, verify
 from ..errors import FileError, FirmaError
-from ..logsetup import log_path
+from ..logsetup import log_path, register_paths
 from ..models import LAST_PAGE, JobResult, Kind, Position, SignJob, StampSpec, VerifyReport
 from . import worker
 from .dialogs import OtpDialog, PasswordDialog, SetupDialog, TextDialog
@@ -575,6 +575,7 @@ class MainWindow(QMainWindow):
     def open_verified_document(self) -> None:
         if self.report is None:
             return
+        register_paths(self.report_path)
         if self.report.content is None:  # a signed PDF: open it as it is
             self.open_url(self.report_path)
             return

@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from .config import config_dir
 from .errors import CredentialsError
-from .logsetup import register_secret
+from .logsetup import register_personal as _mask_in_log
 
 FORMAT = "firma-remota/profilo/1"
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2**15, 8, 1  # ~32 MiB of memory per derivation
@@ -120,8 +120,8 @@ def load(password: str, location: Path | None = None) -> Profile:
 
 
 def register_personal(profile: Profile) -> None:
-    """Mask the account's personal values in every log line (short or generic values excluded)."""
-    register_secret(*(v for v in (profile.login, profile.user, profile.signer_name) if len(v) >= 4))
+    """From now on the log shows only the first and last letter of the username and holder name."""
+    _mask_in_log(profile.login, profile.user, profile.signer_name)
 
 
 def migrate_legacy() -> bool:

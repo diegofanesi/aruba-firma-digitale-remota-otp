@@ -83,8 +83,9 @@ def test_missing_profile():
 def test_unlocking_masks_personal_values_in_the_log():
     vault.save(PROFILE, "pw")
     vault.load("pw")
-    assert {"mario.rossi", "mario.rossi@firma", "Mario Rossi"} <= logsetup._secrets
-    assert "firma" not in logsetup._secrets  # a generic word would mangle every log line
+    assert logsetup.redact("utente mario.rossi@firma, titolare Mario Rossi") == \
+        "utente m" + "*" * 15 + "a, titolare M" + "*" * 9 + "i"
+    assert "firma" not in logsetup._replacements  # a generic word would mangle every log line
 
 
 def legacy_ini(**extra):

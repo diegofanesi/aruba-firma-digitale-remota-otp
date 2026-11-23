@@ -271,7 +271,7 @@ def test_support_report(window, qtbot):
     window.home.support.click()
     qtbot.waitUntil(lambda: bool(window.show_support.calls), timeout=10000)
     text = window.show_support.calls[0][0]
-    assert "Account: mario.rossi@firma" in text and PASSWORD not in text
+    assert "Account: m*********i@firma" in text and PASSWORD not in text and "mario.rossi" not in text
 
 
 def test_startup_smoke_test(tmp_path):

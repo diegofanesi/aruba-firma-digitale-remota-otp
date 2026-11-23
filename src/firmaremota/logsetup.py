@@ -12,20 +12,59 @@ from pathlib import Path
 from .config import state_dir
 
 MASK = "***"
-_secrets: set[str] = set()
+# original text -> what the log shows instead; longest originals are replaced first
+_replacements: dict[str, str] = {}
 # zeep logs whole SOAP envelopes (password and OTP included) at DEBUG; these never go below WARNING.
 _NOISY = ("zeep", "urllib3", "requests")
 _LIBRARIES = ("pyhanko", "pyhanko_certvalidator")
+_MIN_PERSONAL = 3  # shorter values would mangle unrelated words
+
+
+def partial(text: str) -> str:
+    """Only the first and last character stay readable: 'Mario Rossi' -> 'M*********i'."""
+    if len(text) <= 2:
+        return "*" * len(text)
+    return text[0] + "*" * (len(text) - 2) + text[-1]
+
+
+def mask_file_name(name: str) -> str:
+    """'Contratto affitto.pdf' -> 'C***************o.pdf': the extension says nothing personal."""
+    stem, ext = os.path.splitext(name)
+    if not stem or not (1 < len(ext) <= 6 and ext[1:].isalnum()):
+        return partial(name)
+    return partial(stem) + ext
 
 
 def register_secret(*values: str | None) -> None:
-    """Mask these values in every log line from now on (passwords, OTPs, session ids)."""
-    _secrets.update(v for v in values if v)
+    """Hide these values completely in every log line (passwords, OTPs, session ids)."""
+    for value in values:
+        if value:
+            _replacements[value] = MASK
+
+
+def register_personal(*values: str | None) -> None:
+    """Show only the first and last character of these values (usernames, names)."""
+    for value in values:
+        if value and len(value) >= _MIN_PERSONAL and _replacements.get(value) != MASK:
+            _replacements[value] = partial(value)
+
+
+def register_paths(*paths) -> None:
+    """File names and folders the user works with: masked wherever they appear in the log."""
+    for path in paths:
+        if not path:
+            continue
+        path = Path(path)
+        for candidate in (path, path.resolve()):
+            text = str(candidate)
+            if len(candidate.name) >= _MIN_PERSONAL and _replacements.get(text) != MASK:
+                _replacements[text] = f"…/{mask_file_name(candidate.name)}"
+                _replacements.setdefault(candidate.name, mask_file_name(candidate.name))
 
 
 def redact(text: str) -> str:
-    for secret in sorted(_secrets, key=len, reverse=True):
-        text = text.replace(secret, MASK)
+    for original in sorted(_replacements, key=len, reverse=True):
+        text = text.replace(original, _replacements[original])
     return text
 
 

@@ -31,7 +31,7 @@ def isolated_dirs(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setattr(logsetup, "_secrets", set())
+    monkeypatch.setattr(logsetup, "_replacements", {})
     monkeypatch.setattr(vault, "SCRYPT_N", 2**10)  # fast key derivation in tests (production: 2**15)
 
 

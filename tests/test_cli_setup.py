@@ -140,9 +140,9 @@ def test_diagnostica_all_good(env, capsys):
     _configured(env)
     assert cli.main(["diagnostica"]) == 0
     out = capsys.readouterr().out
-    for expected in ("[OK]      Account: mario.rossi@firma, dati cifrati con AES-256",
+    for expected in ("[OK]      Account: m*********i@firma, dati cifrati con AES-256",
                      "Password: salvata in Portachiavi di prova", "Servizio Aruba: raggiungibile",
-                     "Certificato: di Mario Rossi, valido fino al"):
+                     "Certificato: di M*********i, valido fino al"):
         assert expected in out
     assert PASSWORD not in out
     assert env.api.calls == []  # no credentials sent without --account
@@ -170,7 +170,7 @@ def test_diagnostica_problems(env, capsys, monkeypatch):
     assert cli.main(["diagnostica"]) == 1
     out = capsys.readouterr().out
     assert "[ERRORE]  Servizio Aruba: Il servizio non risponde." in out
-    assert "[AVVISO]  Certificato: di Mario Rossi, scade il" in out
+    assert "[AVVISO]  Certificato: di M*********i, scade il" in out
     assert "[AVVISO]  Accessi rifiutati: 1 di fila" in out
 
 
@@ -182,7 +182,7 @@ def test_diagnostica_not_configured(env, capsys):
 def test_report_text_has_no_secrets(env):
     _configured(env)
     text = diagnostics.as_text(diagnostics.report(env.api, PASSWORD, check_account=True))
-    assert PASSWORD not in text
+    assert PASSWORD not in text and "mario.rossi" not in text and "Mario Rossi" not in text
 
 
 @pytest.mark.parametrize("command", ["pdf", "p7m", "verifica", "estrai", "configura", "diagnostica", "gui"])
