@@ -247,6 +247,15 @@ def cmd_diagnostica(args: argparse.Namespace) -> int:
     return EXIT_ERROR if diagnostics.has_errors(lines) else EXIT_OK
 
 
+def cmd_gui(args: argparse.Namespace) -> int:
+    try:
+        from .gui.app import main as gui_main
+    except ImportError as exc:
+        raise FirmaError("L'interfaccia grafica non è installata (manca PySide6): "
+                         "reinstalla firma-remota con l'opzione [gui].", detail=str(exc)) from None
+    return gui_main(args.file)
+
+
 def cmd_estrai(args: argparse.Namespace) -> int:
     src = Path(args.file)
     data = _read(src)
@@ -335,6 +344,11 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostica.add_argument("--account", action="store_true",
                              help="chiede anche ad Aruba di controllare le credenziali (senza codice OTP)")
     diagnostica.set_defaults(handler=cmd_diagnostica)
+
+    gui = commands.add_parser("gui", help="apre l'interfaccia grafica",
+                              description="Apre l'interfaccia grafica, eventualmente con dei file già scelti.")
+    gui.add_argument("file", nargs="*", metavar="FILE", help="file da firmare o da controllare")
+    gui.set_defaults(handler=cmd_gui)
     return parser
 
 

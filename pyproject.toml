@@ -14,13 +14,18 @@ dependencies = [
 [project.scripts]
 firma = "firmaremota.cli:main"
 
+[project.gui-scripts]
+firma-gui = "firmaremota.gui.app:main"
+
 [project.optional-dependencies]
 gui = ["PySide6-Essentials>=6.9,<6.13"]
 
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "pytest-qt>=4",
     "cryptography>=42",
+    "PySide6-Essentials>=6.9,<6.13",
 ]
 
 [build-system]

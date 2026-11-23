@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # GUI tests never open real windows
+
 import base64
 import datetime as dt
 from io import BytesIO

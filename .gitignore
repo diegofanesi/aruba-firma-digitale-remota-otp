@@ -5,3 +5,5 @@ __pycache__/
 dist/
 # Live spike output: contains your certificate data and signed test documents
 spike-output/
+# Documents for manual GUI tests
+prova/

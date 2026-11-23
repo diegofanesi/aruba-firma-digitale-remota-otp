@@ -38,6 +38,9 @@ class Settings:
     type_hsm: str = "COSIGN"
     signer_name: str = ""  # certificate holder, written in the visible stamp
     cert_expires: str = ""  # ISO date, for expiry warnings
+    stamp: str = "no"  # GUI: remember whether a visible stamp was wanted ("si"/"no")
+    stamp_page: str = "ultima"  # "ultima", "prima" or a page number
+    stamp_position: str = "basso-destra"
 
     @property
     def complete(self) -> bool:
