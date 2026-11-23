@@ -9,6 +9,6 @@ Icon=aruba-firma
 Terminal=false
 StartupNotify=true
 StartupWMClass=aruba-firma-gui
-Categories=Office;Utility;
+Categories=Office;
 MimeType=application/pkcs7-mime;application/pdf;
 Keywords=firma;digitale;aruba;pec;p7m;pdf;
