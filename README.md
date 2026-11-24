@@ -15,6 +15,19 @@ resta sui server Aruba e ogni firma è autorizzata con nome utente, password e c
 
 ## Installazione su Arch Linux
 
+Per installarlo sul computer di qualcun altro, un comando unico da incollare nel terminale (chiede
+la password due volte: per installare `git` se manca, e per installare il pacchetto):
+
+```bash
+cd ~ && sudo pacman -S --needed --noconfirm git && if [ -d aruba-firma-digitale-remota-otp ]; then cd aruba-firma-digitale-remota-otp && git pull; else git clone https://github.com/diegofanesi/aruba-firma-digitale-remota-otp.git && cd aruba-firma-digitale-remota-otp; fi && ./install.sh
+```
+
+Crea una sola cartella, `~/aruba-firma-digitale-remota-otp`, senza toccare altro nella home. Si
+può incollare di nuovo lo stesso comando in futuro per aggiornare: se la cartella esiste già fa
+`git pull` invece di clonare da capo, e `./install.sh` reinstalla con il codice più recente.
+
+Lo stesso, passo per passo (più chiaro se lo esegui tu stesso):
+
 ```bash
 git clone https://github.com/diegofanesi/aruba-firma-digitale-remota-otp.git
 cd aruba-firma-digitale-remota-otp
