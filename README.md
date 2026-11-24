@@ -15,10 +15,18 @@ resta sui server Aruba e ogni firma è autorizzata con nome utente, password e c
 
 ## Installazione su Arch Linux
 
-Un solo pacchetto, costruito una volta con `packaging/arch/build.sh` (vedi sotto):
+```bash
+git clone https://github.com/diegofanesi/aruba-firma-digitale-remota-otp.git
+cd aruba-firma-digitale-remota-otp
+./install.sh
+```
+
+Costruisce il pacchetto dal codice appena scaricato e lo installa con pacman (viene chiesta la
+password di amministratore). Per aggiornare più avanti:
 
 ```bash
-sudo pacman -U aruba-firma-0.1.0-1-any.pkg.tar.zst
+git pull
+./install.sh --upgrade
 ```
 
 Le dipendenze sono pacchetti ufficiali che pacman installa da sé; le poche librerie Python che
@@ -27,6 +35,11 @@ pacchetto in `/usr/lib/aruba-firma/vendor` e vengono usate solo se non ce n'è u
 
 Si ottengono i comandi `aruba-firma` e `aruba-firma-gui` e la voce **Aruba Firma Digitale**
 nel menu delle applicazioni. Su KDE Plasma nome utente e password vengono ricordati in KWallet.
+
+Per disinstallare: `sudo pacman -Rs aruba-firma`.
+
+(In alternativa, se qualcuno ti ha dato solo il file `.pkg.tar.zst` senza il resto del
+repository: `sudo pacman -U aruba-firma-0.1.0-1-any.pkg.tar.zst`.)
 
 ## Uso
 
