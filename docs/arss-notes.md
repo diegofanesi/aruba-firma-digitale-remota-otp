@@ -35,6 +35,12 @@ which is gitignored because it contains certificate data).
   coordinates on a `/Rotate 90` page it writes the widget at the rotated rectangle with an upright
   appearance (`/Matrix [0 1 -1 0 0 0]`). Pre-converting to user space puts the stamp off the page.
   Send displayed coordinates; add the CropBox offset only on unrotated pages.
+- **What comes back is checked before it is saved** (security review 2026-11-24): the PAdES result must
+  start with the exact bytes sent (ARSS signs by appending an incremental update, see the `/Info` note
+  below, so the original file is an untouched prefix) and the CAdES envelope must contain exactly the
+  bytes sent; then every signature must verify cryptographically (pyHanko, no trust, no network). A
+  mismatch is a `ServiceError` and nothing is written. The prefix rule rests on the live outputs of
+  2026-11-23; re-check it with `FIRMA_LIVE=1 uv run pytest -m live -s` after any ARSS change.
 - **ARSS bug: dangling `/Info` after signing.** When the input PDF has an `/Info` dictionary, the
   incremental update ARSS appends sets `/Info N 0 R` with `/Size N` and never writes object N.
   Viewers repair it (poppler: "xref num N not found"); the signature stays valid (pyHanko: intact,
@@ -63,7 +69,8 @@ which is gitignored because it contains certificate data).
 | `pkcs7signV2_multiple` | `identity`, `SignRequestV2[]`, `detached`! | `signReturnV2Multiple` |
 | `verify` | `request: verifyRequest{type (PKCS7/PDF/XML/TSD), transport, binaryinput, verdate}` (no credentials) | `verifyReturn{status, description, result: verifySignatures{status, description, signer[]{signername, serialnumber, result, description, marks[], countersigners[]}, mark[]}, binaryoutput}` |
 | `verifyOtp` | `Identity: auth` | `arssReturn{status, return_code, description}` |
-| `tsd` | `MarkRequest{user!, password!, url, transport!, binaryinput}` | `markReturn{binaryoutput, status, return_code, description}` |
+| `tsd` | `MarkRequest{user!, password!, url, transport!, binaryinput}` | `markReturn{binaryoutput, status, return_code, description}` (RFC 5544 `.tsd`) |
+| `tsr` | `MarkRequest` (as `tsd`) | `markReturn` (RFC 3161 `TimeStampResp`, `.tsr`) |
 
 - `auth`: `user`, `userPWD`, `otpPwd`, `typeHSM` (`COSIGN`), `typeOtpAuth` (signing domain), `delegated_*`, `ext_auth*`.
 - `signRequestV2`: `certID`!, `identity`!, `requiredmark`! (timestamp), `transport`! (only `BYNARYNET` is usable from zeep),
@@ -90,7 +97,7 @@ which is gitignored because it contains certificate data).
 | Session lifetime | 5 | ≥ 10 min (signed OK at 0, 3 and 10 min; expiry not reached) |
 | `pkcs7signV2_multiple` works and output is DER? | 6 | Not tested: not needed, sessions chosen |
 | `verify` result strings for a valid signature | 4, 5 | None: `verify` returns an empty response → verify locally |
-| Timestamp: `requiredmark` + `tsa_identity` on CAdES; PADESLTV on PDF; `tsd` | 8 | Out of scope (no TSA credentials) |
+| Timestamp: `requiredmark` + `tsa_identity` on CAdES; PADESLTV on PDF; `tsd` | 8 | Skipped in 2026-11; implemented 2026-11-24 from the WSDL, see "Marche temporali" below |
 | Batch mechanism chosen (session vs `_multiple`) | 5, 6 | **Session**: `opensession` (1 OTP) → sign each file with `session_id` → `closesession` in `finally` |
 | PySide6 line for the father's PC (6.12 needs glibc ≥ 2.34; else 6.9.3) | – | **TBD** (needs `ldd --version` there) |
 
@@ -98,3 +105,33 @@ which is gitignored because it contains certificate data).
 **Go.** Personal account accepted, PAdES and CAdES signing work, batch via session works. OTPs used: 2
 (step 4, step 5). Skipped: step 6 (not needed), step 7 (wrong-OTP test: lockout risk, code 0004 already known),
 step 8 (timestamps out of scope). Still open: the PySide6 line for the father's PC (needs his `ldd --version`).
+
+## Marche temporali (added 2026-11-24, built from the WSDL; **to be confirmed by the live test**)
+Scope = what the official ArubaSign client does (read from its Electron front-end): TSA settings (Indirizzo
+Server, Account TSA, Password; "Marca sempre i file firmati"), signatures with "Tipo di marcatura" T / LT /
+TSD (CAdES only, `.p7m.tsd`), a standalone "Marca" producing `.tsd` or `.tsr`, verification of all of them
+(a `.tsr` needs its original), "Verifica alla data". Aruba's app also relies on a **server-side automatic
+timestamp** for Firma Remota users, switched on in SelfCare (`automaticTimeStamp`).
+
+How this client maps it onto ARSS, and what `FIRMA_LIVE=1 uv run pytest -m live -s` checks (1 OTP, ≤ 9 marks):
+
+| # | Assumption | Live check | Result |
+|---|---|---|---|
+| A0 | A plain signature (`requiredmark=false`) may already carry a TST (SelfCare automatic timestamp) | `has_timestamp` on the un-marked output, recorded | TBD |
+| A1 | The signing `user` + password are accepted as `tsaAuth` (Firma Remota: "marca inclusa") | T signatures succeed, no `TimestampError` | TBD |
+| A2 | `PADESBES` + `requiredmark=true` + `tsa_identity` → signature timestamp inside the PDF (level T) | `has_timestamp(PADES)`; `checks[0].timestamp` present | TBD |
+| A3 | `pkcs7signV2` + `requiredmark=true` → CAdES-T (unsigned `signature_time_stamp_token`) | same on the `.p7m` | TBD |
+| A4 | `PADESLTV` + mark → LT (TST plus revocation data / DocTimeStamp), still verifiable | `verify_file(...).ok`; shape and marks spent recorded | TBD |
+| A5 | `signatureLevel="LT"` accepted on `pkcs7signV2` | LT `.p7m` succeeds; else `ServiceError` → hide LT for `.p7m` | TBD |
+| A6 | The original stays a prefix (PAdES) / the attached content (CAdES) with timestamps | `returned_matches` passes | TBD |
+| A7 | Aruba's TSU certificate chains to an IT trusted-list anchor, listed as QTST | `timestamp.trusted and timestamp.qualified` | TBD |
+| A8 | `tsd` returns RFC 5544 with the content embedded | `tst.parse_tsd(out).content == original` | TBD |
+| A9 | `tsr` returns a DER `TimeStampResp` (granted) over the file | `verify_file(out, original=...)` valid | TBD |
+| A10 | TSA error vocabulary: ArubaSign's 0049 / 0073–0085 / 93001 / 93003 and words like "TSA", "marca" | not provoked (marks, lockout); unit-tested mapping only | unconfirmed |
+
+Decisions after the live run: A1 fails → default becomes ArubaSign's (no timestamp until a TSA account is
+saved with `configura --credenziali-marca`); A2 fails → try `PADESLTV` for T too; A5 fails → remove LT for
+`.p7m`. ArubaSign's TSA error texts: 0049 "Credenziali errate...", 0074 "Hai esaurito le tue marche
+temporali", 0073/0078/0080 service unreachable, 0079 too many requests, 0081/0082 account disabled/expired,
+0085 automatic timestamp failed, 93001 "Indirizzo server Timestamp non specificato", 93003 "credenziali TSA
+errate".

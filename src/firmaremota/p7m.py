@@ -13,7 +13,7 @@ from asn1crypto import cms, x509
 from .errors import FileError
 from .models import SignerInfo
 
-_P7M_SUFFIX = re.compile(r"(\.p7m)+$", re.IGNORECASE)
+_P7M_SUFFIX = re.compile(r"(\.(p7m|tsd))+$", re.IGNORECASE)  # envelopes a document may be wrapped in
 _PEM = re.compile(rb"-----BEGIN [A-Z0-9 ]+-----(.*?)-----END [A-Z0-9 ]+-----", re.DOTALL)
 _QC_STATEMENTS = "1.3.6.1.5.5.7.1.3"
 _SNIFF = ((b"%PDF-", ".pdf"), (b"<?xml", ".xml"), (b"PK\x03\x04", ".zip"))
@@ -41,7 +41,7 @@ def decode(data: bytes) -> bytes:
     return raw
 
 
-def _signed_data(data: bytes) -> cms.SignedData:
+def signed_data(data: bytes) -> cms.SignedData:
     try:
         info = cms.ContentInfo.load(decode(data))
         if info["content_type"].native != "signed_data":
@@ -57,21 +57,26 @@ def _signed_data(data: bytes) -> cms.SignedData:
 
 def is_p7m(data: bytes) -> bool:
     try:
-        _signed_data(data)
+        signed_data(data)
         return True
     except FileError:
         return False
+
+
+def layer_content(signed: cms.SignedData) -> bytes:
+    """The bytes an envelope signs (an attached signature; detached ones are refused)."""
+    content = signed["encap_content_info"]["content"]
+    if content.native is None:
+        raise FileError("Firma separata: il documento originale non è incluso nel file .p7m.")
+    return content.native if isinstance(content.native, bytes) else content.contents
 
 
 def iter_layers(data: bytes, max_depth: int = 10) -> Iterator[tuple[cms.SignedData, bytes]]:
     """(envelope, the bytes it signs) for each nested .p7m layer, outermost first."""
     current = data
     for _ in range(max_depth):
-        signed = _signed_data(current)
-        content = signed["encap_content_info"]["content"]
-        if content.native is None:
-            raise FileError("Firma separata: il documento originale non è incluso nel file .p7m.")
-        current = content.native if isinstance(content.native, bytes) else content.contents
+        signed = signed_data(current)
+        current = layer_content(signed)
         yield signed, current
         if not is_p7m(current):
             return
@@ -118,6 +123,17 @@ def signing_time(si: cms.SignerInfo):
     return None
 
 
+def has_signature_tst(si: cms.SignerInfo) -> bool:
+    """Does this signer info carry an RFC 3161 signature timestamp (unsigned attribute)?"""
+    attrs = si["unsigned_attrs"]
+    return any(attr["type"].native == "signature_time_stamp_token"
+               for attr in (attrs if isinstance(attrs, cms.CMSAttributes) else []))
+
+
+def common_name(cert: x509.Certificate) -> str:
+    return _attribute(cert.subject, "common_name") or cert.subject.human_friendly
+
+
 def _attribute(name: x509.Name, key: str) -> str | None:
     """One value of a name attribute; asn1crypto gives a list when the attribute appears twice."""
     value = name.native.get(key)
@@ -150,7 +166,7 @@ def signer_from_cert(cert: x509.Certificate, signed_at=None) -> SignerInfo:
 
 
 def inner_name(name: str, content: bytes) -> str:
-    """'contratto.pdf.p7m' -> 'contratto.pdf'; 'fattura.p7m' with XML inside -> 'fattura.xml'."""
+    """'contratto.pdf.p7m' -> 'contratto.pdf'; 'fattura.p7m' with XML inside -> 'fattura.xml'; also strips '.tsd'."""
     base = _P7M_SUFFIX.sub("", name) or "documento"
     if "." in base.lstrip("."):
         return base

@@ -23,4 +23,12 @@ else
 fi
 
 git -C "$root" push origin "$tag"
-echo "Pushed $tag. Now run:  packaging/arch/build.sh"
+
+# Pin the checksum of the archive GitHub serves for the tag, and refresh .SRCINFO to match.
+pkgbuild="$here/aruba-firma/PKGBUILD"
+reponame=$(sed -n 's/^_reponame=//p' "$pkgbuild")
+url="https://github.com/diegofanesi/$reponame/archive/refs/tags/$tag.tar.gz"
+hash=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
+sed -i -e "s/^pkgver=.*/pkgver=$version/" -e "s/^_pkgsource_sha256=.*/_pkgsource_sha256='$hash'/" "$pkgbuild"
+(cd "$here/aruba-firma" && makepkg --printsrcinfo > .SRCINFO)
+echo "Pushed $tag; PKGBUILD pinned to $hash (commit PKGBUILD and .SRCINFO). Now run:  packaging/arch/build.sh"

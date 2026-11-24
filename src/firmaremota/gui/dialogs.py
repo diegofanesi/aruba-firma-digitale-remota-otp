@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import html
 import re
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout,
+    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QVBoxLayout,
 )
 
 from .. import credentials, profiles, service
 from ..errors import FirmaError
+from ..models import TsaCredentials
 from . import worker
+
+TSR_NOTE = ("Con il formato TSR la marca è un file separato: se la mandi a qualcuno, manda anche il documento "
+            "originale, con lo stesso nome.")
 
 WARNING_STYLE = "color: #b3261e; font-weight: bold;"
 
@@ -35,7 +40,7 @@ class OtpDialog(QDialog):
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         if who:
-            layout.addWidget(_label(f"Account: <b>{who}</b>"))
+            layout.addWidget(_label(f"Account: <b>{html.escape(who)}</b>"))
         layout.addWidget(_label("Apri l'app <b>Aruba OTP</b> sul telefono e scrivi qui il codice che vedi."))
         if note:
             layout.addWidget(_label(note, style=WARNING_STYLE))
@@ -89,7 +94,7 @@ class LoginDialog(QDialog):
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         if who:
-            layout.addWidget(_label(f"Account: <b>{who}</b>"))
+            layout.addWidget(_label(f"Account: <b>{html.escape(who)}</b>"))
         layout.addWidget(_label("Scrivi i dati del tuo account di firma remota Aruba." if need_user
                                 else "Scrivi la password del tuo account di firma remota Aruba."))
         form = QFormLayout()
@@ -156,6 +161,33 @@ class ProfileEditDialog(QDialog):
         self.remember = QCheckBox(f"Ricorda la password ({store.name})")
         self.remember.setChecked(self.has_saved_password if profile else True)
         layout.addWidget(self.remember)
+        # Timestamps, as in Aruba Sign's settings: "Marca sempre i file firmati" and the TSA account.
+        group = QGroupBox("Marca temporale")
+        box = QVBoxLayout(group)
+        self.timestamp = QCheckBox("Marca sempre i file firmati (data certa; consigliato)")
+        self.timestamp.setChecked(profile.timestamp if profile else True)
+        box.addWidget(self.timestamp)
+        saved_tsa = profiles.tsa_account(store, profile) if profile else None
+        self.tsa_separate = QCheckBox("Usa un account TSA separato (altrimenti le credenziali di firma)")
+        self.tsa_separate.setChecked(saved_tsa is not None)
+        box.addWidget(self.tsa_separate)
+        tsa_form = QFormLayout()
+        self.tsa_user = QLineEdit(saved_tsa.user if saved_tsa else "")
+        self.tsa_password = QLineEdit()
+        self.tsa_password.setEchoMode(QLineEdit.EchoMode.Password)
+        if saved_tsa:
+            self.tsa_password.setPlaceholderText("lascia vuoto per non cambiarla")
+        self.tsa_url = QLineEdit(saved_tsa.url if saved_tsa and saved_tsa.url else "")
+        self.tsa_url.setPlaceholderText("vuoto: il servizio di Aruba")
+        tsa_form.addRow("Account TSA:", self.tsa_user)
+        tsa_form.addRow("Password TSA:", self.tsa_password)
+        tsa_form.addRow("Indirizzo server:", self.tsa_url)
+        box.addLayout(tsa_form)
+        for field in (self.tsa_user, self.tsa_password, self.tsa_url):
+            field.setEnabled(self.tsa_separate.isChecked())
+            self.tsa_separate.toggled.connect(field.setEnabled)
+        layout.addWidget(group)
+        self.saved_tsa = saved_tsa
         self.status = _label("")
         layout.addWidget(self.status)
         row = QHBoxLayout()
@@ -179,8 +211,11 @@ class ProfileEditDialog(QDialog):
             self.alias.setText(self.user.text().strip())
 
     def _set_busy(self, busy: bool, message: str = "", style: str = "") -> None:
-        for widget in (self.alias, self.user, self.domain, self.password, self.remember, self.check, self.cancel):
+        for widget in (self.alias, self.user, self.domain, self.password, self.remember, self.check, self.cancel,
+                       self.timestamp, self.tsa_separate):
             widget.setEnabled(not busy)
+        for field in (self.tsa_user, self.tsa_password, self.tsa_url):
+            field.setEnabled(not busy and self.tsa_separate.isChecked())
         self.status.setText(message)
         self.status.setStyleSheet(style)
 
@@ -194,10 +229,12 @@ class ProfileEditDialog(QDialog):
             self._set_busy(False, "Compila nome, nome utente, dominio e password.", WARNING_STYLE)
             return
         try:
-            profile = profiles.new_profile(alias, user, domain, id=self.editing.id if self.editing else None)
+            profile = profiles.new_profile(alias, user, domain, id=self.editing.id if self.editing else None,
+                                           timestamp=self.timestamp.isChecked())
             clash = profiles.find(self.existing, alias)
             if clash is not None and clash.id != profile.id:
                 raise FirmaError(f"C'è già un account chiamato «{clash.alias}»: scegli un altro nome.")
+            self._tsa_to_save()  # validated now, saved after Aruba accepts the signing credentials
         except FirmaError as exc:
             self._set_busy(False, exc.message, WARNING_STYLE)
             return
@@ -209,6 +246,17 @@ class ProfileEditDialog(QDialog):
         message = exc.message if isinstance(exc, FirmaError) else f"Errore imprevisto: {exc}"
         self._set_busy(False, message, WARNING_STYLE)
 
+    def _tsa_to_save(self) -> TsaCredentials | None:
+        """The separate TSA account to store, or None to use the signing credentials. Not checked with
+        Aruba: every attempt would spend a mark."""
+        if not self.tsa_separate.isChecked():
+            return None
+        user = self.tsa_user.text().strip()
+        password = self.tsa_password.text() or (self.saved_tsa.password if self.saved_tsa else "")
+        if not (user and password):
+            raise FirmaError("Per l'account TSA separato servono nome utente e password.")
+        return TsaCredentials(user, password, self.tsa_url.text().strip() or None)
+
     def _checked(self, profile: profiles.Profile, password: str) -> None:
         try:
             self.profiles = profiles.upsert(self.store, self.existing, profile)
@@ -216,6 +264,11 @@ class ProfileEditDialog(QDialog):
                 profiles.set_password(self.store, profile, password)
             else:
                 profiles.forget_password(self.store, profile)
+            tsa = self._tsa_to_save()
+            if tsa is not None:
+                profiles.set_tsa(self.store, profile, tsa)
+            else:
+                profiles.forget_tsa(self.store, profile)
         except FirmaError as exc:
             self._set_busy(False, exc.message, WARNING_STYLE)
             return
@@ -263,7 +316,8 @@ class ProfilesDialog(QDialog):
         self.list.clear()
         for profile in self.profiles:
             saved = "" if profiles.password(self.store, profile) else "  (password non salvata)"
-            self.list.addItem(f"{profile.alias}  —  {profile.login}{saved}")
+            mark = "" if profile.timestamp else "  (senza marca temporale)"
+            self.list.addItem(f"{profile.alias}  —  {profile.login}{saved}{mark}")
         if self.profiles:
             self.list.setCurrentRow(self.profiles.index(select) if select in self.profiles else 0)
         self._update_buttons()
@@ -344,3 +398,33 @@ class TextDialog(QDialog):
 
     def copy(self) -> None:
         QGuiApplication.clipboard().setText(self.text.toPlainText())
+
+
+class TimestampFormatDialog(QDialog):
+    """Which file a standalone timestamp produces (Aruba Sign: "Seleziona il formato di marca temporale")."""
+
+    def __init__(self, parent, count: int):
+        super().__init__(parent)
+        self.setWindowTitle("Marca temporale")
+        self.setMinimumWidth(620)
+        layout = QVBoxLayout(self)
+        what = "al file" if count == 1 else f"ai {count} file"
+        layout.addWidget(_label(f"Dà data certa {what}, senza firmarli e senza codice OTP. In che formato?"))
+        self.tsd = QRadioButton("TSD (consigliato): un solo file, nome.estensione.tsd, con dentro documento e marca")
+        self.tsr = QRadioButton("TSR: solo la marca, nome.estensione.tsr, da tenere insieme al documento")
+        self.tsd.setChecked(True)
+        layout.addWidget(self.tsd)
+        layout.addWidget(self.tsr)
+        self.note = _label(TSR_NOTE, style=WARNING_STYLE)
+        self.note.setVisible(False)
+        self.tsr.toggled.connect(self.note.setVisible)
+        layout.addWidget(self.note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Marca")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Annulla")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def value(self) -> str:
+        return "tsr" if self.tsr.isChecked() else "tsd"

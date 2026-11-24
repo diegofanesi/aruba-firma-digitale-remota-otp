@@ -1,15 +1,16 @@
 """The official lists of qualified signing authorities (EU list of trusted lists -> Italian list).
 
-A list is only cached after its XML signature has been verified (the EU list against the signer
-certificates bundled with pyHanko, the Italian list against the certificates the EU list names
-for it). Later runs parse the cached copy, refreshing it once it is older than MAX_AGE; when the
-network is down an older copy is used and the report says so.
+Both the EU list (LOTL) and the Italian list are downloaded over HTTPS and their XML signatures
+verified (the LOTL against the signer certificates bundled with pyHanko, the Italian list against
+the certificates the LOTL names for it). Both are cached, and **re-verified the same way every
+time they are loaded from the cache**: the cache is just a copy, never a source of trust. The
+cache is refreshed once older than MAX_AGE; when the network is down an older copy is used and
+the report says so.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import json
 import logging
 import os
@@ -30,6 +31,9 @@ TERRITORIES = ("IT",)
 MAX_AGE = dt.timedelta(days=7)
 TIMEOUT = (10, 60)  # connect, read
 _TSL_NS = "http://uri.etsi.org/02231/v2#"
+_LOTL = "LOTL"
+# Entities, DTDs and network access are never needed in a trusted list.
+_PARSER = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False)
 
 
 class TrustListError(FirmaError):
@@ -56,15 +60,34 @@ def relax_taken_over_by(tl_xml: str) -> str:
 
     The extension only records which company took a service over; pyHanko doesn't implement it
     and, because Italy marks it critical, would otherwise skip ~30 authorities (old Postecom,
-    InfoCamere, Telecom CAs...). Only applied to lists whose signature was already verified.
+    InfoCamere, Telecom CAs...). Only applied after the list's signature has been verified.
     """
-    root = etree.fromstring(tl_xml.encode("utf-8"))
+    root = etree.fromstring(tl_xml.encode("utf-8"), parser=_PARSER)
     for ext in root.iter(f"{{{_TSL_NS}}}Extension"):
         if ext.get("Critical") == "true" and any(
             isinstance(child.tag, str) and etree.QName(child).localname == "TakenOverBy" for child in ext
         ):
             ext.set("Critical", "false")
     return etree.tostring(root, encoding="unicode")
+
+
+def verify(lotl_xml: str, lists: dict[str, str]) -> None:
+    """Check the LOTL's signature and, with the signer certificates it names, each territory list's.
+
+    Raises if any signature doesn't verify or a territory is missing from the LOTL.
+    """
+    lotl = eutl_parse.validate_and_parse_lotl(lotl_xml, eutl_parse.latest_known_lotl_tlso_certs())
+    parser_log = logging.getLogger(eutl_parse.__name__)
+    level = parser_log.level
+    parser_log.setLevel(logging.ERROR)  # this pass is only about the signature: the TakenOverBy noise comes later
+    try:
+        for territory, xml in lists.items():
+            ref = next((r for r in lotl.references if r.territory == territory), None)
+            if ref is None:
+                raise TrustListError(f"L'elenco europeo non indica dove trovare l'elenco {territory}.")
+            eutl_parse.trust_list_to_registry(xml, ref.tlso_certs)  # raises if the signature doesn't verify
+    finally:
+        parser_log.setLevel(level)
 
 
 def _parse(lists: dict[str, str]) -> TSPRegistry:
@@ -82,72 +105,75 @@ def _get(session: requests.Session, url: str) -> str:
     return response.content.decode("utf-8")
 
 
-def download(session: requests.Session | None = None) -> dict[str, str]:
-    """Fetch and verify the EU list of lists and the lists in TERRITORIES; returns their XML."""
+def download(session: requests.Session | None = None) -> tuple[str, dict[str, str]]:
+    """Fetch the EU list of lists and the lists in TERRITORIES; returns (LOTL XML, {territory: XML}), verified."""
     session = session or requests.Session()
-    lotl = eutl_parse.validate_and_parse_lotl(_get(session, EU_LOTL_LOCATION), eutl_parse.latest_known_lotl_tlso_certs())
+    lotl_xml = _get(session, EU_LOTL_LOCATION)
+    lotl = eutl_parse.validate_and_parse_lotl(lotl_xml, eutl_parse.latest_known_lotl_tlso_certs())
     lists = {}
     for territory in TERRITORIES:
         ref = next((r for r in lotl.references if r.territory == territory), None)
         if ref is None:
             raise TrustListError(f"L'elenco europeo non indica dove trovare l'elenco {territory}.")
-        xml = _get(session, ref.location_uri)
-        eutl_parse.trust_list_to_registry(xml, ref.tlso_certs)  # raises if the signature doesn't verify
-        lists[territory] = xml
-    return lists
+        lists[territory] = _get(session, ref.location_uri)
+    verify(lotl_xml, lists)
+    return lotl_xml, lists
 
 
-def _save(lists: dict[str, str], fetched_at: dt.datetime) -> None:
+def _save(lotl_xml: str, lists: dict[str, str], fetched_at: dt.datetime) -> None:
     directory = _dir()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    meta = {"fetched_at": fetched_at.isoformat(), "lists": {}}
-    for territory, xml in lists.items():
-        data = xml.encode("utf-8")
-        tmp = directory / f"{territory}.xml.tmp"
-        tmp.write_bytes(data)
-        os.replace(tmp, directory / f"{territory}.xml")
-        meta["lists"][territory] = hashlib.sha256(data).hexdigest()
+    for name, xml in {_LOTL: lotl_xml, **lists}.items():
+        tmp = directory / f"{name}.xml.tmp"
+        tmp.write_bytes(xml.encode("utf-8"))
+        os.replace(tmp, directory / f"{name}.xml")
     tmp = directory / "meta.json.tmp"
-    tmp.write_text(json.dumps(meta))
+    tmp.write_text(json.dumps({"fetched_at": fetched_at.isoformat(), "lists": sorted(lists)}))
     os.replace(tmp, _meta_path())
 
 
-def _load_cached() -> tuple[dict[str, str], dt.datetime] | None:
+def _load_cached() -> tuple[str, dict[str, str], dt.datetime] | None:
+    """(LOTL XML, lists, fetched_at) from the cache, signatures re-verified; None if unusable."""
     try:
         meta = json.loads(_meta_path().read_text())
-        lists = {}
-        for territory in TERRITORIES:
-            data = (_dir() / f"{territory}.xml").read_bytes()
-            if hashlib.sha256(data).hexdigest() != meta["lists"][territory]:
-                log.warning("elenco %s in cache danneggiato", territory)
-                return None
-            lists[territory] = data.decode("utf-8")
-        return lists, dt.datetime.fromisoformat(meta["fetched_at"])
-    except (OSError, ValueError, KeyError):
+        if set(meta["lists"]) != set(TERRITORIES):
+            return None
+        lotl_xml = (_dir() / f"{_LOTL}.xml").read_text(encoding="utf-8")
+        lists = {t: (_dir() / f"{t}.xml").read_text(encoding="utf-8") for t in TERRITORIES}
+        fetched_at = dt.datetime.fromisoformat(meta["fetched_at"])
+    except (OSError, ValueError, KeyError, TypeError):
         return None
+    try:
+        verify(lotl_xml, lists)
+    except Exception as exc:  # tampered, truncated, or signer certificates rotated
+        log.warning("elenco di fiducia in cache non valido, verrà scaricato di nuovo: %s", exc)
+        return None
+    return lotl_xml, lists, fetched_at
 
 
 def cached_date() -> dt.datetime | None:
-    """When the cached lists were downloaded, or None. Doesn't touch the network."""
-    cached = _load_cached()
-    return cached[1] if cached else None
+    """When the cached lists were downloaded, or None. Doesn't touch the network (nor verify)."""
+    try:
+        return dt.datetime.fromisoformat(json.loads(_meta_path().read_text())["fetched_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def load(allow_network: bool = True, session: requests.Session | None = None) -> TrustList:
     now = dt.datetime.now(dt.timezone.utc)
     cached = _load_cached()
-    if cached and now - cached[1] < MAX_AGE:
-        return TrustList(_parse(cached[0]), cached[1], stale=False)
+    if cached and now - cached[2] < MAX_AGE:
+        return TrustList(_parse(cached[1]), cached[2], stale=False)
     if allow_network:
         try:
-            lists = download(session)
-            _save(lists, now)
+            lotl_xml, lists = download(session)
+            _save(lotl_xml, lists, now)
             log.info("elenco di fiducia aggiornato")
             return TrustList(_parse(lists), now, stale=False)
         except Exception as exc:  # network, HTTP, or signature problems: fall back to the cache
             log.warning("aggiornamento elenco di fiducia non riuscito: %s", exc)
     if cached:
-        return TrustList(_parse(cached[0]), cached[1], stale=True)
+        return TrustList(_parse(cached[1]), cached[2], stale=True)
     raise TrustListError(
         "Non è stato possibile scaricare l'elenco ufficiale dei certificatori: "
         "controlla la connessione a Internet e riprova."

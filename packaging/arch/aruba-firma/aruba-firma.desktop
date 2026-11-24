@@ -10,5 +10,5 @@ Terminal=false
 StartupNotify=true
 StartupWMClass=aruba-firma-gui
 Categories=Office;
-MimeType=application/pkcs7-mime;application/pdf;
-Keywords=firma;digitale;aruba;pec;p7m;pdf;
+MimeType=application/pkcs7-mime;application/pdf;application/timestamped-data;application/timestamp-reply;
+Keywords=firma;digitale;aruba;pec;p7m;pdf;marca;temporale;tsd;tsr;

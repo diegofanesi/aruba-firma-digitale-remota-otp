@@ -18,16 +18,40 @@ def test_relax_taken_over_by_only():
     assert relaxed.count('Critical="true"') == 1
 
 
+def test_relax_never_expands_entities(tmp_path):
+    secret = tmp_path / "segreto.txt"
+    secret.write_text("CONTENUTO-RISERVATO")
+    evil = (f'<?xml version="1.0"?><!DOCTYPE t [<!ENTITY x SYSTEM "file://{secret}">]>'
+            '<TrustServiceStatusList xmlns="http://uri.etsi.org/02231/v2#"><Ext>&x;</Ext></TrustServiceStatusList>')
+    try:
+        relaxed = trustlist.relax_taken_over_by(evil)
+    except Exception:  # noqa: BLE001 - refusing the document outright is fine too
+        return
+    assert "CONTENUTO-RISERVATO" not in relaxed
+
+
+class _Downloads(list):
+    verified: list
+
+
 @pytest.fixture
 def fake_lists(monkeypatch):
-    downloads = []
+    """A fake network and a fake signature check; `.verified` records every (re-)verification."""
+    downloads, verified = _Downloads(), []
 
     def download(session=None):
         downloads.append(1)
-        return {"IT": "<lista/>"}
+        return "<lotl/>", {"IT": "<lista/>"}
+
+    def verify(lotl_xml, lists):
+        verified.append((lotl_xml, dict(lists)))
+        if lotl_xml != "<lotl/>" or any(xml != "<lista/>" for xml in lists.values()):
+            raise ValueError("firma non valida")
 
     monkeypatch.setattr(trustlist, "download", download)
+    monkeypatch.setattr(trustlist, "verify", verify)
     monkeypatch.setattr(trustlist, "_parse", lambda lists: f"registro:{sorted(lists)}")
+    downloads.verified = verified
     return downloads
 
 
@@ -36,6 +60,13 @@ def test_download_then_cache(fake_lists):
     assert first.registry == "registro:['IT']" and not first.stale
     second = trustlist.load()
     assert len(fake_lists) == 1 and second.fetched_at == first.fetched_at
+    assert (trustlist._dir() / "LOTL.xml").read_text() == "<lotl/>"  # the LOTL is cached too, for re-verification
+
+
+def test_cache_is_reverified_on_every_load(fake_lists):
+    trustlist.load()
+    trustlist.load()
+    assert fake_lists.verified == [("<lotl/>", {"IT": "<lista/>"})]  # once per load from the cache (download verifies itself)
 
 
 def _age_cache(days):
@@ -65,8 +96,14 @@ def test_nothing_available(monkeypatch):
         trustlist.load()
 
 
-def test_corrupted_cache_is_ignored(fake_lists):
+@pytest.mark.parametrize("tampered", ["IT.xml", "LOTL.xml"])
+def test_tampered_cache_is_ignored(fake_lists, tampered, monkeypatch):
+    """A cached list whose signature no longer verifies is never used, even when offline."""
     trustlist.load()
-    (trustlist._dir() / "IT.xml").write_text("<manomessa/>")
+    (trustlist._dir() / tampered).write_text("<manomessa/>")
     trustlist.load()
     assert len(fake_lists) == 2
+    (trustlist._dir() / tampered).write_text("<manomessa/>")
+    monkeypatch.setattr(trustlist, "download", lambda session=None: (_ for _ in ()).throw(OSError("offline")))
+    with pytest.raises(trustlist.TrustListError):
+        trustlist.load()

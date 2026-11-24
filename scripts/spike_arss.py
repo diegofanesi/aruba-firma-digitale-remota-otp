@@ -181,7 +181,7 @@ class Spike:
         self.results: list[dict] = []
         self.client = Client(
             str(WSDL),
-            settings=Settings(xml_huge_tree=True),
+            settings=Settings(xml_huge_tree=True, forbid_dtd=True, forbid_external=True),
             transport=Transport(timeout=30, operation_timeout=180),
             plugins=[Recorder(self.out, self.secrets)],
         )
@@ -229,11 +229,16 @@ class Spike:
             self.after_failure(credentialed and not expect_failure)
             return None
         elapsed = round(time.monotonic() - started, 2)
+        if isinstance(resp, str) and operation == "opensession":
+            self.secrets.add(resp.strip())  # a live session id lets anyone sign without an OTP
         data = summarize(resp)
         status = data.get("status") if isinstance(data, dict) else None
         ok = status in (None, "OK") if isinstance(data, dict) else True
         self.record(step, operation, ok, data, seconds=elapsed)
-        shown = {k: v for k, v in data.items() if k in ("status", "return_code", "description")} if isinstance(data, dict) else data
+        if isinstance(data, dict):
+            shown = {k: v for k, v in data.items() if k in ("status", "return_code", "description")}
+        else:
+            shown = "<nascosto>" if operation == "opensession" else data
         print(f"  -> {operation}: {shown}  ({elapsed}s)")
         if not ok:
             self.after_failure(credentialed and not expect_failure)

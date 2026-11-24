@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Teaches the desktop what .tsd and .tsr files are (shared-mime-info doesn't know them), so that
+     Aruba Firma Digitale can be their default application and a double-click opens the verification. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/timestamped-data">
+    <comment>Documento con marca temporale (TSD)</comment>
+    <comment xml:lang="en">Timestamped document (TSD)</comment>
+    <sub-class-of type="application/octet-stream"/>
+    <glob pattern="*.tsd"/>
+    <glob pattern="*.TSD"/>
+  </mime-type>
+  <mime-type type="application/timestamp-reply">
+    <comment>Marca temporale separata (TSR)</comment>
+    <comment xml:lang="en">Detached timestamp (TSR)</comment>
+    <sub-class-of type="application/octet-stream"/>
+    <glob pattern="*.tsr"/>
+    <glob pattern="*.TSR"/>
+  </mime-type>
+</mime-info>

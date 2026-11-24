@@ -95,3 +95,56 @@ def test_loading_registers_personal_values_for_the_log():
     logsetup._replacements.clear()
     profiles.load_all(store)
     assert logsetup.redact("Papà firma come mario.rossi@firma") == "P**à firma come m" + "*" * 15 + "a"
+
+
+def test_timestamp_flag_roundtrip_and_default():
+    store = MemoryStore()
+    saved = profiles.upsert(store, [], profiles.new_profile("Mario", "mario.rossi", "firma", timestamp=False))
+    saved = profiles.upsert(store, saved, profiles.new_profile("Anna", "anna", "firma"))
+    assert [p.timestamp for p in profiles.load_all(store)] == [False, True]
+    store.data[profiles.INDEX_KEY] = json.dumps([{"id": "a1", "alias": "Vecchio", "login": "x@firma"}])  # older layout
+    assert profiles.load_all(store)[0].timestamp is True
+
+
+def test_tsa_account_fallback_and_saved():
+    from firmaremota.models import TsaCredentials
+
+    store = MemoryStore()
+    p = profiles.upsert(store, [], profiles.new_profile("Mario", "mario.rossi", "firma"))[0]
+    assert profiles.tsa_account(store, p) is None
+    assert profiles.tsa_credentials(store, p, "mario.rossi", "pw") == TsaCredentials("mario.rossi", "pw")
+    assert profiles.tsa_credentials(None, None, "typed", "pw") == TsaCredentials("typed", "pw")
+    profiles.set_tsa(store, p, TsaCredentials("tsa-user", "tsa-pw", "https://tsa.example"))
+    assert profiles.tsa_account(store, p) == TsaCredentials("tsa-user", "tsa-pw", "https://tsa.example")
+    assert profiles.tsa_credentials(store, p, "mario.rossi", "pw").user == "tsa-user"
+    assert set(store.data) == {profiles.INDEX_KEY, p.tsa_key} and "mario" not in p.tsa_key
+    profiles.forget_tsa(store, p)
+    assert profiles.tsa_account(store, p) is None
+    store.data[p.tsa_key] = "{broken"
+    with pytest.raises(credentials.CredentialStoreError):
+        profiles.tsa_account(store, p)
+
+
+def test_remove_and_forget_all_delete_the_tsa_entry():
+    from firmaremota.models import TsaCredentials
+
+    store = MemoryStore()
+    saved = profiles.upsert(store, [], profiles.new_profile("Mario", "mario.rossi", "firma"))
+    saved = profiles.upsert(store, saved, profiles.new_profile("Anna", "anna", "firma"))
+    for p in saved:
+        profiles.set_password(store, p, "pw")
+        profiles.set_tsa(store, p, TsaCredentials("u", "p"))
+    saved = profiles.remove(store, saved, saved[0])
+    assert all(":" not in k or k.endswith(saved[0].id) for k in store.data if k != profiles.INDEX_KEY)
+    profiles.forget_all(store, saved)
+    assert store.data == {}
+
+
+def test_tsa_password_is_a_secret_for_the_log():
+    from firmaremota.models import TsaCredentials
+
+    store = MemoryStore()
+    p = profiles.upsert(store, [], profiles.new_profile("Mario", "mario.rossi", "firma"))[0]
+    logsetup._replacements.clear()
+    profiles.set_tsa(store, p, TsaCredentials("tsa-user", "Segreto-TSA"))
+    assert "Segreto-TSA" not in logsetup.redact("pw Segreto-TSA") and "Segreto-TSA" not in repr(profiles.tsa_account(store, p))

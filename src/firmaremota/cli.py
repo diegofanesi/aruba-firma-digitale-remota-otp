@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
 import getpass
 import logging
@@ -10,13 +11,14 @@ import re
 import sys
 from pathlib import Path
 
-from . import __version__, config, credentials, diagnostics, files, logsetup, messages, p7m, profiles, service, verify
+from . import __version__, config, credentials, diagnostics, files, logsetup, messages, p7m, profiles, service, tst, verify
 from .errors import CredentialsError, FirmaError, OtpError
-from .models import LAST_PAGE, Kind, Position, SignerInfo, SignJob, StampSpec
+from .models import LAST_PAGE, Kind, Position, SignerInfo, SignJob, StampSpec, TimestampType, TsaCredentials
 
 log = logging.getLogger("firmaremota.cli")
 
-EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_PARTIAL = 0, 1, 2, 4
+EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_PARTIAL, EXIT_UNVERIFIABLE = 0, 1, 2, 4, 5
+VERDICT_EXIT = {"valida": EXIT_OK, "non verificabile": EXIT_UNVERIFIABLE}  # anything else: EXIT_ERROR
 _OTP = re.compile(r"[0-9]{6,8}")  # ASCII digits only: \d would also accept e.g. Arabic-Indic numerals
 
 
@@ -26,7 +28,10 @@ def make_api():
     return ArssClient()
 
 
-def _read(path: Path) -> bytes:
+def _read(path: Path, limit: int | None = None) -> bytes:
+    problem = files.check_size(path, files.MAX_VERIFY_SIZE if limit is None else limit)
+    if problem:
+        raise FirmaError(problem)
     try:
         return path.read_bytes()
     except OSError as exc:
@@ -82,15 +87,29 @@ def _typed_password() -> str:
     return getpass.getpass("Password Aruba: ")
 
 
-def _credentials(args: argparse.Namespace, settings: config.Settings) -> tuple[str, str, str, profiles.Profile | None]:
-    """(user, domain, password, profile): from the wallet where possible, typed otherwise."""
+def _credentials(args: argparse.Namespace, settings: config.Settings):
+    """(user, domain, password, profile, store): from the wallet where possible, typed otherwise."""
     store, available = _saved_profiles()
     profile = _choose_profile(available, getattr(args, "account", None), settings)
     if profile is None:
         user, domain = _typed_login()
-        return user, domain, _typed_password(), None
+        return user, domain, _typed_password(), None, store
     password = profiles.password(store, profile) or _typed_password()
-    return profile.user, profile.domain, password, profile
+    return profile.user, profile.domain, password, profile, store
+
+
+def _timestamp_wanted(args: argparse.Namespace, profile: profiles.Profile | None) -> bool:
+    """--marca / --senza-marca win; otherwise the account's setting (on by default, also for typed logins)."""
+    wanted = getattr(args, "marca", None)
+    if wanted is not None:
+        return wanted
+    return profile.timestamp if profile is not None else True
+
+
+def _remember_profile(settings: config.Settings, profile: profiles.Profile | None) -> None:
+    if profile is not None and settings.last_profile != profile.id:
+        settings.last_profile = profile.id
+        config.save(settings)
 
 
 def _warn_expiry(signer: SignerInfo) -> None:
@@ -102,7 +121,8 @@ def _warn_expiry(signer: SignerInfo) -> None:
 
 def _ask_otp() -> str:
     for _ in range(3):
-        otp = input("Codice OTP dall'app Aruba OTP: ").strip().replace(" ", "")
+        otp = getpass.getpass("Codice OTP dall'app Aruba OTP (non viene mostrato mentre lo scrivi): ")
+        otp = otp.strip().replace(" ", "")
         if _OTP.fullmatch(otp):
             return otp
         print("Il codice OTP è fatto di sole cifre (di solito 8): riprova.", file=sys.stderr)
@@ -145,31 +165,37 @@ def _sign(args: argparse.Namespace, kind: Kind) -> int:
         print("Nessun file è stato firmato e non è stato usato alcun codice OTP.", file=sys.stderr)
         return EXIT_ERROR
 
-    user, domain, password, profile = _credentials(args, settings)
+    jobs = service.fingerprint(jobs)  # a file that changes from now on is refused at signing time
+    user, domain, password, profile, store = _credentials(args, settings)
+    level = TimestampType(args.tipo_marca) if _timestamp_wanted(args, profile) else None
+    tsa = profiles.tsa_credentials(store, profile, user, password) if level else None
     api = make_api()
     _confirm_after_failures()
     account, signer = service.prepare_account(api, user, domain, password, settings)
     _warn_expiry(signer)
-    if profile is not None and settings.last_profile != profile.id:
-        settings.last_profile = profile.id
-        config.save(settings)
+    _remember_profile(settings, profile)
+    with_mark = ", con marca temporale" if level else ""
     if len(jobs) > 1:
-        print(f"Firmo {len(jobs)} file con un solo codice OTP.")
+        print(f"Firmo {len(jobs)} file con un solo codice OTP{with_mark}.")
     otp = _ask_otp()
+    results = service.sign_batch(api, account, password, otp, jobs, out_dir=out_dir, signer_name=signer.name,
+                                 progress=_progress, tsa=tsa, level=level)
+    return _report(results, "Firmato", "Non firmato", with_mark.strip(", "))
 
-    def progress(done: int, total: int, name: str) -> None:
-        if name:
-            print(f"[{done + 1}/{total}] {name}")
 
-    results = service.sign_batch(api, account, password, otp, jobs, out_dir=out_dir,
-                                 signer_name=signer.name, progress=progress)
+def _progress(done: int, total: int, name: str) -> None:
+    if name:
+        print(f"[{done + 1}/{total}] {name}")
+
+
+def _report(results, done: str, failed: str, note: str = "") -> int:
     for result in results:
         if result.ok:
-            print(f"Firmato: {result.output}")
+            print(f"{done}: {result.output}" + (f" — {note}" if note else ""))
         else:
-            print(f"Non firmato: {result.job.src.name}: {result.error.message}", file=sys.stderr)
-    signed = sum(r.ok for r in results)
-    return EXIT_OK if signed == len(jobs) else EXIT_PARTIAL if signed else EXIT_ERROR
+            print(f"{failed}: {result.job.src.name}: {result.error.message}", file=sys.stderr)
+    ok = sum(r.ok for r in results)
+    return EXIT_OK if ok == len(results) else EXIT_PARTIAL if ok else EXIT_ERROR
 
 
 def cmd_pdf(args: argparse.Namespace) -> int:
@@ -180,17 +206,56 @@ def cmd_p7m(args: argparse.Namespace) -> int:
     return _sign(args, Kind.CADES)
 
 
+TSR_NOTE = ("Formato TSR: la marca è un file separato. Se la mandi a qualcuno, manda anche il documento "
+            "originale, con lo stesso nome.")
+
+
+def cmd_marca(args: argparse.Namespace) -> int:
+    """A standalone timestamp on each file: no signature, no OTP (ArubaSign's "Marca" tab)."""
+    settings = config.load()
+    fmt = Kind.TSR if args.formato == "tsr" else Kind.TSD
+    jobs = [SignJob(Path(f), fmt) for f in args.file]
+    out_dir = Path(args.cartella) if args.cartella else None
+    problems = service.preflight(jobs, out_dir)
+    if problems:
+        for problem in problems:
+            print(f"Errore: {problem}", file=sys.stderr)
+        print("Nessun file è stato marcato.", file=sys.stderr)
+        return EXIT_ERROR
+    jobs = service.fingerprint(jobs)
+    user, domain, password, profile, store = _credentials(args, settings)
+    tsa = profiles.tsa_credentials(store, profile, user, password)
+    _remember_profile(settings, profile)
+    if fmt is Kind.TSR:
+        print(TSR_NOTE)
+    results = service.timestamp_batch(make_api(), tsa, jobs, out_dir=out_dir, progress=_progress)
+    return _report(results, "Marcato", "Non marcato")
+
+
+def _date_arg(text: str) -> dt.datetime:
+    try:
+        day = dt.datetime.strptime(text.strip(), "%d/%m/%Y")
+    except ValueError:
+        raise argparse.ArgumentTypeError("usa il formato GG/MM/AAAA, per esempio 31/12/2027") from None
+    return day.replace(hour=23, minute=59, second=59).astimezone()  # the end of that day, local time
+
+
 def cmd_verifica(args: argparse.Namespace) -> int:
     print("Verifica in corso...")
-    report = verify.verify_file(Path(args.file))
+    original = Path(args.originale) if args.originale else None
+    report = verify.verify_file(Path(args.file), original=original, at=args.alla_data)
     for index, check in enumerate(report.checks, start=1):
         if len(report.checks) > 1:
             print(f"\n--- Firma {index} di {len(report.checks)} ---")
         print("\n".join(messages.check_lines(check)))
+    if not report.checks:
+        print(messages.verdict_title(report))
+    for line in messages.timestamp_lines(report):
+        print(line)
     if report.content_name:
         print(f"\nDocumento contenuto: {report.content_name} (per salvarlo: aruba-firma estrai {args.file})")
     print(f"\n{messages.trust_list_line(report)}")
-    return EXIT_OK if report.ok else EXIT_ERROR
+    return VERDICT_EXIT.get(report.verdict, EXIT_ERROR)
 
 
 def _yes(question: str, default: bool = True) -> bool:
@@ -222,7 +287,14 @@ def _ask_account(default_user: str, default_domain: str) -> tuple[str, str]:
 
 
 def _needs_profile(args: argparse.Namespace) -> bool:
-    return bool(args.rimuovi or args.dimentica_password or args.salva_password)
+    return bool(args.rimuovi or args.dimentica_password or args.salva_password or args.marca is not None
+                or args.credenziali_marca or args.dimentica_credenziali_marca)
+
+
+def _timestamp_label(store, profile: profiles.Profile) -> str:
+    if not profile.timestamp:
+        return "marca temporale: no"
+    return "marca temporale: sì (" + ("account TSA" if store.get(profile.tsa_key) else "credenziali di firma") + ")"
 
 
 def cmd_configura(args: argparse.Namespace) -> int:
@@ -241,13 +313,13 @@ def cmd_configura(args: argparse.Namespace) -> int:
             print("Nessun account salvato.")
         for profile in available:
             saved = "password salvata" if profiles.password(store, profile) else "password non salvata"
-            print(f"{profile.alias}: {profile.login} ({saved})")
+            print(f"{profile.alias}: {profile.login} ({saved}; {_timestamp_label(store, profile)})")
         return EXIT_OK
     if args.dimentica_tutto:
         profiles.forget_all(store, available)
         print(f"Tutti gli account sono stati rimossi da {store.name}.")
         return EXIT_OK
-    if args.rimuovi or args.dimentica_password:
+    if args.rimuovi or args.dimentica_password or args.marca is not None or args.dimentica_credenziali_marca:
         profile = _choose_profile(available, args.account, settings)
         if profile is None:
             print("Nessun account salvato.")
@@ -255,13 +327,36 @@ def cmd_configura(args: argparse.Namespace) -> int:
         if args.rimuovi:
             profiles.remove(store, available, profile)
             print(f"Account «{profile.alias}» rimosso da {store.name}.")
-        else:
+        elif args.dimentica_password:
             profiles.forget_password(store, profile)
             print(f"Password di «{profile.alias}» rimossa: verrà chiesta a ogni firma.")
+        elif args.marca is not None:
+            wanted = args.marca == "si"
+            profiles.upsert(store, available, dataclasses.replace(profile, timestamp=wanted))
+            print(f"Marca temporale per «{profile.alias}»: {'attiva' if wanted else 'disattivata'}"
+                  + (" (le firme avranno una marca temporale)." if wanted else " (firme senza marca)."))
+        else:
+            profiles.forget_tsa(store, profile)
+            print(f"Credenziali TSA di «{profile.alias}» rimosse: per le marche si useranno quelle di firma.")
         return EXIT_OK
 
     if not sys.stdin.isatty():
         raise FirmaError("'aruba-firma configura' va eseguito in un terminale.")
+    if args.credenziali_marca:
+        profile = _choose_profile(available, args.account, settings)
+        if profile is None:
+            raise CredentialsError("Nessun account salvato: esegui 'aruba-firma configura' senza opzioni per aggiungerne uno.")
+        print("Credenziali del servizio di marca temporale (come in Aruba Sign: Account TSA, Password, Indirizzo "
+              "server). Lascia vuoto l'indirizzo per usare quello di Aruba.")
+        tsa_user = input(f"Account TSA [{profile.user}]: ").strip() or profile.user
+        tsa_password = getpass.getpass("Password TSA: ")
+        if not tsa_password:
+            raise CredentialsError("Serve la password del servizio di marca temporale.")
+        url = input("Indirizzo server TSA [predefinito Aruba]: ").strip() or None
+        profiles.set_tsa(store, profile, TsaCredentials(tsa_user, tsa_password, url))
+        print(f"Credenziali TSA di «{profile.alias}» salvate in {store.name} (verranno controllate alla prima marca: "
+              "ogni prova consuma una marca).")
+        return EXIT_OK
     api = make_api()
     if args.salva_password:
         profile = _choose_profile(available, args.account, settings)
@@ -283,7 +378,8 @@ def cmd_configura(args: argparse.Namespace) -> int:
     password = _new_password() if remember else getpass.getpass("Password Aruba: ")
     print("Controllo le credenziali con Aruba (non serve il codice OTP)...")
     _, signer = service.prepare_account(api, user, domain, password)
-    profile = profiles.new_profile(alias, user, domain, id=editing.id if editing else None)
+    profile = profiles.new_profile(alias, user, domain, id=editing.id if editing else None,
+                                   timestamp=editing.timestamp if editing else True)
     profiles.upsert(store, available, profile)
     if remember:
         profiles.set_password(store, profile, password)
@@ -298,11 +394,23 @@ def cmd_configura(args: argparse.Namespace) -> int:
         print(f"Nome utente e password sono in {store.name}; sul disco non viene salvato nient'altro.")
     else:
         print(f"Nome utente in {store.name}; la password verrà chiesta a ogni firma.")
+    if profile.timestamp:
+        print("Marca temporale: attiva (le firme avranno data certa; per disattivarla: aruba-firma configura --marca no).")
     return EXIT_OK
 
 
 def cmd_diagnostica(args: argparse.Namespace) -> int:
-    lines = diagnostics.report(make_api(), check_credentials=args.credenziali)
+    only = None
+    if args.credenziali:  # one account per run: the one asked for, else the last used, else the only one
+        store, saved = _saved_profiles()
+        settings = config.load()
+        if args.account:
+            profile = _choose_profile(saved, args.account, settings)
+        else:
+            usable = [p for p in saved if profiles.password(store, p)]
+            profile = profiles.by_id(usable, settings.last_profile) or _choose_profile(usable, None, settings)
+        only = profile.id if profile else None
+    lines = diagnostics.report(make_api(), check_credentials=args.credenziali, only_profile_id=only)
     print(diagnostics.as_text(lines))
     return EXIT_ERROR if diagnostics.has_errors(lines) else EXIT_OK
 
@@ -321,7 +429,12 @@ def cmd_estrai(args: argparse.Namespace) -> int:
     out_dir = Path(args.cartella) if args.cartella else src.resolve().parent
     logsetup.register_paths(src, out_dir)
     data = _read(src)
-    result = p7m.unwrap(data)
+    if tst.is_tsr(data):
+        raise FirmaError("Una marca temporale .tsr non contiene il documento: il documento è il file con lo stesso "
+                         "nome senza «.tsr». Per controllarla: aruba-firma verifica FILE.tsr")
+    result = tst.unwrap(data)
+    if not result.layers and not result.timestamps:
+        raise FirmaError("Il file non è né una busta firmata .p7m né un documento marcato .tsd.")
     problem = files.check_writable(out_dir)
     if problem:
         raise FirmaError(problem)
@@ -330,7 +443,10 @@ def cmd_estrai(args: argparse.Namespace) -> int:
     for depth, signers in enumerate(result.layers, start=1):
         label = "Firmato da" if len(result.layers) == 1 else f"Firma {depth} di {len(result.layers)}:"
         print(f"{label} {messages.signers_line(signers)}")
-    print("Attenzione: questa è una lettura del file, la validità della firma non è stata verificata.")
+    if result.timestamps:
+        print(f"Marca temporale: sì ({result.timestamps} busta .tsd)" if result.timestamps == 1
+              else f"Marche temporali: {result.timestamps} buste .tsd")
+    print("Attenzione: questa è una lettura del file, la validità della firma e delle marche non è stata verificata.")
     print(f"Documento estratto: {out}")
     log.info("estratto %s -> %s (%d buste)", src.name, out.name, len(result.layers))
     return EXIT_OK
@@ -338,6 +454,17 @@ def cmd_estrai(args: argparse.Namespace) -> int:
 
 def _add_output_option(parser: argparse.ArgumentParser, default: str) -> None:
     parser.add_argument("--cartella", metavar="CARTELLA", help=f"dove salvare (predefinito: {default})")
+
+
+def _add_timestamp_options(parser: argparse.ArgumentParser, levels: list[str]) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--marca", dest="marca", action="store_const", const=True, default=None,
+                       help="aggiunge la marca temporale (data certa) alla firma")
+    group.add_argument("--senza-marca", dest="marca", action="store_const", const=False,
+                       help="firma senza marca temporale, qualunque sia l'impostazione dell'account")
+    parser.add_argument("--tipo-marca", choices=levels, default="T",
+                        help="T: marca nella firma (predefinito); LT: anche con i dati di revoca"
+                             + ("; TSD: busta .p7m.tsd" if "TSD" in levels else ""))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -363,6 +490,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="angolo del timbro (predefinito: basso-destra)")
     pdf.add_argument("--testo", help="testo aggiuntivo nel timbro")
     pdf.add_argument("--immagine", metavar="FILE", help="immagine (PNG/JPEG) da mettere nel timbro")
+    _add_timestamp_options(pdf, ["T", "LT"])
     _add_output_option(pdf, "accanto a ogni PDF")
     pdf.set_defaults(handler=cmd_pdf)
 
@@ -372,22 +500,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p7m_cmd.add_argument("file", nargs="+", metavar="FILE", help="i file da firmare")
     p7m_cmd.add_argument("--account", metavar="ALIAS", help="con quale account firmare (se ce n'è più d'uno)")
+    _add_timestamp_options(p7m_cmd, ["T", "LT", "TSD"])
     _add_output_option(p7m_cmd, "accanto a ogni file")
     p7m_cmd.set_defaults(handler=cmd_p7m)
 
-    verifica = commands.add_parser(
-        "verifica", help="verifica la firma di un PDF o di un file .p7m",
-        description="Verifica le firme di un PDF firmato o di un file .p7m con l'elenco ufficiale dei certificatori.",
+    marca = commands.add_parser(
+        "marca", help="mette una marca temporale (data certa) su uno o più file, senza firmarli",
+        description="Mette una marca temporale su uno o più file, senza firmarli e senza codice OTP: prova che il "
+                    "file esisteva a quella data. Formato TSD (predefinito): nome.estensione.tsd contiene file e "
+                    "marca; formato TSR: nome.estensione.tsr contiene solo la marca, da conservare insieme al file.",
     )
-    verifica.add_argument("file", metavar="FILE", help="il file firmato")
+    marca.add_argument("file", nargs="+", metavar="FILE", help="i file da marcare")
+    marca.add_argument("--formato", choices=["tsd", "tsr"], default="tsd", help="tipo di file prodotto (predefinito: tsd)")
+    marca.add_argument("--account", metavar="ALIAS", help="con quale account (se ce n'è più d'uno)")
+    _add_output_option(marca, "accanto a ogni file")
+    marca.set_defaults(handler=cmd_marca)
+
+    verifica = commands.add_parser(
+        "verifica", help="verifica la firma di un PDF o di un file .p7m, o una marca temporale (.tsd, .tsr)",
+        description="Verifica le firme di un PDF firmato o di un file .p7m, e le marche temporali (anche .tsd e "
+                    ".tsr), con l'elenco ufficiale dei certificatori.",
+    )
+    verifica.add_argument("file", metavar="FILE", help="il file firmato o marcato")
+    verifica.add_argument("--originale", metavar="FILE",
+                          help="per una marca .tsr: il documento a cui si riferisce (predefinito: lo stesso nome "
+                               "senza .tsr, nella stessa cartella)")
+    verifica.add_argument("--alla-data", type=_date_arg, metavar="GG/MM/AAAA",
+                          help="valuta la firma com'era a quella data (per esempio prima della scadenza del certificato)")
+    verifica.epilog = ("Codice di uscita: 0 firma valida, 5 firma non verificabile (per esempio senza rete), "
+                       "1 firma non valida o errore.")
     verifica.set_defaults(handler=cmd_verifica)
 
     estrai = commands.add_parser(
-        "estrai", help="estrae il documento originale da un file .p7m",
-        description="Estrae il documento originale da un file .p7m (anche con più firme annidate).",
+        "estrai", help="estrae il documento originale da un file .p7m o .tsd",
+        description="Estrae il documento originale da un file .p7m o da un documento marcato .tsd (anche annidati).",
     )
-    estrai.add_argument("file", metavar="FILE", help="il file .p7m")
-    _add_output_option(estrai, "accanto al .p7m")
+    estrai.add_argument("file", metavar="FILE", help="il file .p7m o .tsd")
+    _add_output_option(estrai, "accanto al file")
     estrai.set_defaults(handler=cmd_estrai)
 
     configura = commands.add_parser(
@@ -403,6 +552,12 @@ def build_parser() -> argparse.ArgumentParser:
     only.add_argument("--dimentica-password", action="store_true", help="cancella la password dal portachiavi")
     only.add_argument("--rimuovi", action="store_true", help="rimuove l'account dal portachiavi")
     only.add_argument("--dimentica-tutto", action="store_true", help="rimuove tutti gli account dal portachiavi")
+    only.add_argument("--marca", choices=["si", "no"], help="mettere la marca temporale su tutto ciò che si firma? "
+                                                              "(predefinito: si)")
+    only.add_argument("--credenziali-marca", action="store_true",
+                      help="salva un account TSA separato per le marche temporali (altrimenti si usano le "
+                           "credenziali di firma)")
+    only.add_argument("--dimentica-credenziali-marca", action="store_true", help="torna a usare le credenziali di firma")
     configura.set_defaults(handler=cmd_configura)
 
     diagnostica = commands.add_parser(
@@ -411,7 +566,9 @@ def build_parser() -> argparse.ArgumentParser:
                     "Non mostra mai la password.",
     )
     diagnostica.add_argument("--credenziali", action="store_true",
-                             help="chiede anche ad Aruba di controllare le credenziali salvate (senza codice OTP)")
+                             help="chiede anche ad Aruba di controllare la password salvata dell'account usato "
+                                  "per ultimo, o di quello indicato con --account (senza codice OTP)")
+    diagnostica.add_argument("--account", metavar="ALIAS", help="quale account controllare con --credenziali")
     diagnostica.set_defaults(handler=cmd_diagnostica)
 
     gui = commands.add_parser("gui", help="apre l'interfaccia grafica",

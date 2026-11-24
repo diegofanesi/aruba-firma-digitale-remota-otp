@@ -6,8 +6,8 @@ import requests
 
 from firmaremota import logsetup
 from firmaremota.arss.client import ArssClient, map_error
-from firmaremota.errors import CredentialsError, NetworkError, OtpError, ServiceError, SessionExpired
-from firmaremota.models import Account, AuthCtx, ResolvedStamp
+from firmaremota.errors import CredentialsError, NetworkError, OtpError, ServiceError, SessionExpired, TimestampError
+from firmaremota.models import Account, AuthCtx, Kind, ResolvedStamp, TimestampType, TsaCredentials
 
 from .conftest import asn1_cert
 from .fakes import SESSION_ID, FakeTransport, fault, sign_error, sign_ok, soap
@@ -64,6 +64,89 @@ def test_sign_cades_requests_attached_der():
     assert transport.field(0, "returnder") == "true"
 
 
+TSA = TsaCredentials("mario.rossi", "Pw-tsa-456")
+
+
+@pytest.mark.parametrize(("level", "profile", "cades_level"), [
+    (TimestampType.T, "PADESBES", None), (TimestampType.LT, "PADESLTV", "LT"),
+])
+def test_sign_with_tsa_sends_requiredmark_identity_and_level(level, profile, cades_level):
+    api, transport = client({"pdfsignatureV2": sign_ok("pdfsignatureV2", b"%PDF-1.7 x"),
+                             "pkcs7signV2": sign_ok("pkcs7signV2", b"\x30\x80p7m")})
+    auth = AuthCtx(ACCOUNT, PASSWORD, session_id=SESSION_ID, tsa=TSA, level=level)
+    api.sign_pdf(auth, b"%PDF-1.7")
+    assert transport.field(0, "requiredmark") == "true" and transport.field(0, "pdfprofile") == profile
+    assert transport.field(0, "tsa_identity/user") == "mario.rossi" and transport.field(0, "tsa_identity/password") == "Pw-tsa-456"
+    assert transport.field(0, "tsa_identity/tsaurl") is None and transport.field(0, "signatureLevel") is None
+    api.sign_cades(auth, b"dati")
+    assert transport.field(1, "requiredmark") == "true" and transport.field(1, "signatureLevel") == cades_level
+    assert transport.field(1, "tsa_identity/user") == "mario.rossi"
+
+
+def test_tsa_server_address_is_passed_through():
+    api, transport = client({"pkcs7signV2": sign_ok("pkcs7signV2", b"\x30\x80p7m")})
+    tsa = TsaCredentials("tsa-user", "pw", url="https://tsa.example/ts")
+    api.sign_cades(AuthCtx(ACCOUNT, PASSWORD, session_id=SESSION_ID, tsa=tsa, level=TimestampType.T), b"dati")
+    assert transport.field(0, "tsa_identity/tsaurl") == "https://tsa.example/ts"
+
+
+def test_tsd_level_or_no_tsa_means_no_mark():
+    api, transport = client({"pkcs7signV2": sign_ok("pkcs7signV2", b"\x30\x80p7m")})
+    api.sign_cades(AuthCtx(ACCOUNT, PASSWORD, session_id=SESSION_ID, tsa=TSA, level=TimestampType.TSD), b"dati")
+    api.sign_cades(AuthCtx(ACCOUNT, PASSWORD, session_id=SESSION_ID, level=TimestampType.T), b"dati")  # no account
+    for index in (0, 1):
+        assert transport.field(index, "requiredmark") == "false" and transport.field(index, "tsa_identity") is None
+
+
+@pytest.mark.parametrize(("fmt", "operation"), [(Kind.TSD, "tsd"), (Kind.TSR, "tsr")])
+def test_standalone_timestamp_request_shape(fmt, operation):
+    api, transport = client({operation: sign_ok(operation, b"\x30\x82marca")})
+    assert api.timestamp_file(TSA, b"dati", fmt) == b"\x30\x82marca"
+    assert transport.field(0, "user") == "mario.rossi" and transport.field(0, "password") == "Pw-tsa-456"
+    assert transport.field(0, "transport") == "BYNARYNET" and transport.field(0, "url") is None
+    assert transport.field(0, "otpPwd") is None and transport.field(0, "certID") is None
+
+
+@pytest.mark.parametrize(("code", "description", "message_part"), [
+    ("0049", "Credenziali errate, controlla la username e la password", "credenziali TSA"),
+    ("0074", "Hai esaurito le tue marche temporali", "sono finite"),
+    ("0073", "The time stamp service is not reachable", "marca temporale"),
+    ("93003", "credenziali TSA errate", "marca temporale"),
+    ("0001", "TSA credential invalid", "marca temporale"),
+    ("0001", "Impossibile richiedere il TimeStampToken", "marca temporale"),
+    ("0001", "Marche temporali esaurite", "sono finite"),
+])
+def test_tsa_errors_map_to_timestamp_error(code, description, message_part):
+    api, _ = client({"pkcs7signV2": sign_error("pkcs7signV2", code, description)})
+    with pytest.raises(TimestampError) as exc:
+        api.sign_cades(AuthCtx(ACCOUNT, PASSWORD, session_id=SESSION_ID, tsa=TSA, level=TimestampType.T), b"dati")
+    assert message_part in exc.value.message and exc.value.exit_code == 1
+
+
+def test_otp_error_still_wins_over_tsa_words():
+    assert isinstance(map_error("0004", "Otp Credential Invalid Or Blocked (timestamp)"), OtpError)
+    assert isinstance(map_error("0003", "Invalid user credentials"), CredentialsError)  # untouched by the TSA rules
+
+
+def test_tsd_credential_error_is_about_the_tsa():
+    """A wrong TSA password on a `tsd` call must not look like (or count as) a wrong signing password."""
+    api, _ = client({"tsd": sign_error("tsd", "0003", "Invalid user credentials")})
+    with pytest.raises(TimestampError):
+        api.timestamp_file(TSA, b"dati", Kind.TSD)
+
+
+def test_tsa_password_never_reaches_the_log(tmp_path):
+    log_file = logsetup.setup(debug=True, directory=tmp_path / "logs")
+    api, _ = client({"tsd": sign_error("tsd", "0049", f"bad {TSA.password}")})
+    with pytest.raises(TimestampError) as exc:
+        api.timestamp_file(TSA, b"dati", Kind.TSD)
+    auth = AuthCtx(ACCOUNT, PASSWORD, session_id=SESSION_ID, tsa=TSA, level=TimestampType.T)
+    logging.getLogger("firmaremota.test").warning("dettaglio: %s / %r", exc.value.detail, auth)
+    for handler in logging.getLogger("firmaremota").handlers:
+        handler.flush()
+    assert TSA.password not in log_file.read_text() and TSA.password not in repr(auth)
+
+
 def test_large_documents():
     """lxml refuses text nodes over 10 MB unless huge_tree is on: an ~11 MB base64 answer must work."""
     big = os.urandom(8 * 1024 * 1024)
@@ -90,6 +173,15 @@ def test_errors_are_mapped(response, error):
     with pytest.raises(error) as exc:
         api.sign_cades(AuthCtx(ACCOUNT, PASSWORD, session_id=SESSION_ID), b"dati")
     assert exc.value.message  # always an Italian message to show
+
+
+def test_responses_with_a_doctype_are_refused():
+    """No DTDs, no external entities: a response can't make the parser read files or call out."""
+    evil = (b'<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/hostname">]>'
+            + soap("ping", "<return>&x;</return>"))
+    api, _ = client({"ping": evil})
+    with pytest.raises(ServiceError, match="Risposta non valida"):
+        api.ping()
 
 
 def test_map_error_keeps_unknown_code():

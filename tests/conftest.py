@@ -36,6 +36,9 @@ def pytest_configure(config):
         os.environ[name] = str(sandbox / name.lower())
 # QCStatements with a single QcCompliance (0.4.0.1862.1.1) statement: marks a qualified certificate.
 QC_STATEMENTS = bytes.fromhex("300a3008060604008e460101")
+# When the test time-stamping authority says things happened: in the past, inside every test
+# certificate's validity except the deliberately expired one's end.
+TS_TIME = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=20)).replace(microsecond=0)
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +84,8 @@ def pki():
         .sign(ca_key, hashes.SHA256())
     )
 
-    def leaf(given: str, surname: str, cf: str):
+    def leaf(given: str, surname: str, cf: str, *, not_before=now - dt.timedelta(days=1),
+             not_after=now + dt.timedelta(days=365)):
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         subject = _name(
             f"{given} {surname}",
@@ -93,7 +97,7 @@ def pki():
             x509.CertificateBuilder()
             .subject_name(subject).issuer_name(ca_name).public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(now - dt.timedelta(days=1)).not_valid_after(now + dt.timedelta(days=365))
+            .not_valid_before(not_before).not_valid_after(not_after)
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(x509.KeyUsage(True, True, False, False, False, False, False, False, False), critical=True)
             .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
@@ -102,7 +106,32 @@ def pki():
         )
         return cert, key
 
-    return {"ca": ca, "mario": leaf("Mario", "Rossi", "RSSMRA80A01H501U"), "anna": leaf("Anna", "Bianchi", "BNCNNA75C41F205X")}
+    def tsa(cn: str, issuer_name=ca_name, issuer_key=ca_key):
+        """A time-stamping unit: RFC 3161 wants the timeStamping extended key usage, critical."""
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(_name(cn)).issuer_name(issuer_name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(days=30)).not_valid_after(now + dt.timedelta(days=3000))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.KeyUsage(True, False, False, False, False, False, False, False, False), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.TIME_STAMPING]), critical=True)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_key.public_key()), critical=False)
+            .sign(issuer_key, hashes.SHA256())
+        )
+        return cert, key
+
+    return {
+        "ca": ca, "ca_key": ca_key,
+        "mario": leaf("Mario", "Rossi", "RSSMRA80A01H501U"),
+        "anna": leaf("Anna", "Bianchi", "BNCNNA75C41F205X"),
+        # certificate expired yesterday, but in force at TS_TIME: valid only thanks to a timestamp
+        "scaduto": leaf("Carlo", "Verdi", "VRDCRL70A01H501Z", not_before=now - dt.timedelta(days=400),
+                        not_after=now - dt.timedelta(days=1)),
+        "tsa": tsa("TSA di prova"),
+        "make_tsa": tsa,
+    }
 
 
 @pytest.fixture(scope="session")
@@ -111,9 +140,9 @@ def signer(pki):
 
 
 @pytest.fixture
-def make_p7m(signer):
-    def make(content: bytes, *, detached: bool = False, encoding: str = "der", also=()) -> bytes:
-        cert, key = signer
+def make_p7m(pki):
+    def make(content: bytes, *, detached: bool = False, encoding: str = "der", also=(), who: str = "mario") -> bytes:
+        cert, key = pki[who]
         options = [pkcs7.PKCS7Options.Binary]
         if detached:
             options.append(pkcs7.PKCS7Options.DetachedSignature)
@@ -161,29 +190,104 @@ def asn1_cert(cert: x509.Certificate):
     return asn1_x509.Certificate.load(cert.public_bytes(serialization.Encoding.DER))
 
 
-@pytest.fixture
-def sign_pdf(pki):
-    """Sign a PDF locally with pyHanko, as Mario Rossi."""
+def asn1_key(key):
     from asn1crypto import keys
-    from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+
+    return keys.PrivateKeyInfo.load(
+        key.private_bytes(serialization.Encoding.DER, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    )
+
+
+def simple_signer(pki, who: str):
+    """A pyHanko signer for one of the test people, with the CA certificate alongside."""
     from pyhanko.sign import signers
     from pyhanko_certvalidator.registry import SimpleCertificateStore
 
-    cert, key = pki["mario"]
-    pdf_signer = signers.SimpleSigner(
-        signing_cert=asn1_cert(cert),
-        signing_key=keys.PrivateKeyInfo.load(
-            key.private_bytes(serialization.Encoding.DER, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
-        ),
-        cert_registry=SimpleCertificateStore.from_certs([asn1_cert(pki["ca"])]),
-    )
+    cert, key = pki[who]
+    return signers.SimpleSigner(signing_cert=asn1_cert(cert), signing_key=asn1_key(key),
+                                cert_registry=SimpleCertificateStore.from_certs([asn1_cert(pki["ca"])]))
 
-    def sign(pdf: bytes) -> bytes:
-        out = signers.sign_pdf(IncrementalPdfFileWriter(BytesIO(pdf)), signers.PdfSignatureMetadata(field_name="Firma1"),
-                               signer=pdf_signer)
-        return out.getvalue()
+
+def dummy_timestamper(pki, cert_key, when=TS_TIME):
+    """A TSA that signs any request itself, always saying it is `when`."""
+    from pyhanko.sign.timestamps import DummyTimeStamper
+    from pyhanko_certvalidator.registry import SimpleCertificateStore
+
+    cert, key = cert_key
+    return DummyTimeStamper(asn1_cert(cert), asn1_key(key), fixed_dt=when,
+                            certs_to_embed=SimpleCertificateStore.from_certs([asn1_cert(pki["ca"])]))
+
+
+@pytest.fixture(scope="session")
+def timestamper(pki):
+    return dummy_timestamper(pki, pki["tsa"])
+
+
+@pytest.fixture
+def sign_pdf(pki, timestamper):
+    """Sign a PDF locally with pyHanko (default: as Mario Rossi), optionally with a signature timestamp
+    (PAdES-T style) and/or a document timestamp added afterwards (what an LTA update looks like)."""
+    from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+    from pyhanko.sign import signers
+    from pyhanko.sign.signers.pdf_signer import PdfTimeStamper
+
+    def sign(pdf: bytes, *, timestamp: bool = False, doc_timestamp: bool = False, who: str = "mario",
+             field_name: str = "Firma1", stamper=None) -> bytes:
+        stamper = stamper or timestamper
+        out = signers.sign_pdf(IncrementalPdfFileWriter(BytesIO(pdf)), signers.PdfSignatureMetadata(field_name=field_name),
+                               signer=simple_signer(pki, who), timestamper=stamper if timestamp else None)
+        data = out.getvalue()
+        if doc_timestamp:
+            out = PdfTimeStamper(stamper).timestamp_pdf(IncrementalPdfFileWriter(BytesIO(data)), "sha256")
+            data = out.getvalue()
+        return data
 
     return sign
+
+
+@pytest.fixture
+def make_token(timestamper):
+    """An RFC 3161 timestamp token (ContentInfo) over `content`, from the test TSA."""
+    import asyncio
+    import hashlib
+
+    def make(content: bytes, *, stamper=None):
+        return asyncio.run((stamper or timestamper).async_timestamp(hashlib.sha256(content).digest(), "sha256"))
+
+    return make
+
+
+@pytest.fixture
+def make_tsd(make_token):
+    from firmaremota import tst
+
+    def make(content: bytes, *, stamper=None) -> bytes:
+        return tst.build_tsd(content, [make_token(content, stamper=stamper)])
+
+    return make
+
+
+@pytest.fixture
+def make_tsr(make_token):
+    from firmaremota import tst
+
+    def make(content: bytes, *, stamper=None) -> bytes:
+        return tst.build_tsr(make_token(content, stamper=stamper))
+
+    return make
+
+
+@pytest.fixture
+def make_cades_t(pki, timestamper):
+    """A .p7m whose signature carries an RFC 3161 timestamp token (CAdES-T)."""
+    import asyncio
+
+    def make(content: bytes, *, who: str = "mario", stamper=None) -> bytes:
+        info = asyncio.run(simple_signer(pki, who).async_sign_general_data(
+            content, "sha256", detached=False, use_cades=True, timestamper=stamper or timestamper))
+        return info.dump()
+
+    return make
 
 
 PASSWORD = "pw-salvata"
@@ -208,16 +312,16 @@ class MemoryStore:
         self.data.pop(key, None)
 
 
-def add_profile(store, alias, login, password=None, id=None):
+def add_profile(store, alias, login, password=None, id=None, timestamp=True):
     """Put an account into a fake wallet the way the app lays it out; returns the Profile."""
     import json
 
     from firmaremota import credentials, profiles
 
     user, domain = credentials.split_login(login)
-    profile = profiles.Profile(id or f"{abs(hash(alias)) % 10**16:016x}", alias, user, domain)
+    profile = profiles.Profile(id or f"{abs(hash(alias)) % 10**16:016x}", alias, user, domain, timestamp)
     index = json.loads(store.data.get(profiles.INDEX_KEY, "[]"))
-    index.append({"id": profile.id, "alias": profile.alias, "login": profile.login})
+    index.append({"id": profile.id, "alias": profile.alias, "login": profile.login, "marca": timestamp})
     store.data[profiles.INDEX_KEY] = json.dumps(index)
     if password is not None:
         store.data[profile.password_key] = password

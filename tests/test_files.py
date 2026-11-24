@@ -81,3 +81,10 @@ def test_write_new_unwritable_folder(tmp_path):
 def test_check_writable(tmp_path):
     assert files.check_writable(tmp_path) is None
     assert "non esiste" in files.check_writable(tmp_path / "manca")
+
+
+def test_timestamp_names_and_envelope_chains():
+    assert files.tsd_name(Path("/a/nota.txt")) == "nota.txt.tsd"
+    assert files.tsr_name(Path("/a/nota.txt")) == "nota.txt.tsr"
+    assert list(islice(files.candidates("doc.pdf.p7m.tsd"), 3)) == ["doc.pdf.p7m.tsd", "doc (2).pdf.p7m.tsd", "doc (3).pdf.p7m.tsd"]
+    assert list(islice(files.candidates("nota.txt.tsr"), 2)) == ["nota.txt.tsr", "nota (2).txt.tsr"]

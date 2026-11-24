@@ -73,3 +73,19 @@ def test_garbage_is_rejected(data):
 )
 def test_inner_name(name, content, expected):
     assert p7m.inner_name(name, content) == expected
+
+
+@pytest.mark.parametrize(("name", "expected"), [
+    ("contratto.pdf.tsd", "contratto.pdf"), ("contratto.pdf.p7m.tsd", "contratto.pdf"), ("X.PDF.P7M.TSD", "X.PDF"),
+    ("nota.txt.tsr", "nota.txt.tsr"),  # a .tsr holds no document: nothing to strip
+])
+def test_inner_name_strips_tsd_too(name, expected):
+    assert p7m.inner_name(name, b"") == expected
+
+
+def test_tst_unwrap_mixes_envelopes(make_p7m, make_tsd):
+    from firmaremota import tst
+
+    result = tst.unwrap(make_tsd(make_p7m(make_tsd(PDF))))
+    assert result.content == PDF and result.timestamps == 2 and [s.name for layer in result.layers for s in layer] == ["Mario Rossi"]
+    assert tst.unwrap(b"ciao") == tst.Unwrapped(b"ciao", [], 0)

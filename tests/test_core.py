@@ -120,6 +120,34 @@ def test_log_masks_secrets(tmp_path):
     assert logging.getLogger("zeep").getEffectiveLevel() >= logging.WARNING
 
 
+def test_library_loggers_are_redacted_and_never_reach_the_console(tmp_path, capsys):
+    """zeep/urllib3 log through the same redacting file handler; nothing of theirs goes to stderr."""
+    log_file = logsetup.setup(directory=tmp_path / "logs", console=True)
+    logsetup.register_secret("Pw-segreta-123")
+    for name in ("zeep", "zeep.transports", "urllib3.connectionpool", "requests", "pyhanko"):
+        logging.getLogger(name).warning("busta con Pw-segreta-123 dentro")
+        logging.getLogger(name).debug("mai: Pw-segreta-123")
+    for handler in logging.getLogger("firmaremota").handlers + logging.getLogger("zeep").handlers:
+        handler.flush()
+    text = log_file.read_text()
+    assert text.count("busta con") == 5 and "Pw-segreta-123" not in text and "mai:" not in text
+    assert "busta con" not in capsys.readouterr().err
+
+
+def test_size_cap_and_openable_types(tmp_path):
+    from firmaremota import files
+
+    small = tmp_path / "a.bin"
+    small.write_bytes(b"x" * 10)
+    assert files.check_size(small, 10) is None
+    assert "troppo grande" in files.check_size(small, 9)
+    assert "Impossibile leggere" in files.check_size(tmp_path / "manca", 10)
+    for name in ("Contratto.PDF", "nota.txt", "foto.jpeg", "x.docx", "allegati.zip", "doc.pdf.p7m"):
+        assert files.safe_to_open(name), name
+    for name in ("link.desktop", "pagina.html", "script.sh", "logo.svg", "prog.exe", "x.AppImage", "senza-estensione", ""):
+        assert not files.safe_to_open(name), name
+
+
 @pytest.mark.parametrize(
     ("value", "masked"),
     [("Mario Rossi", "M" + "*" * 9 + "i"), ("mario.rossi@firma", "m" + "*" * 15 + "a"), ("ab", "**"), ("", "")],
@@ -158,7 +186,7 @@ def test_log_shows_first_and_last_letter_of_personal_data(tmp_path):
     assert "manca …/C*************i.pdf" in text
 
 
-def test_signing_log_has_no_file_names(tmp_path, make_pdf, make_p7m):
+def test_signing_log_has_no_file_names(tmp_path, make_pdf, make_p7m, sign_pdf):
     from firmaremota import service
     from firmaremota.errors import ServiceError
     from firmaremota.models import Account, Kind, SignJob
@@ -172,7 +200,8 @@ def test_signing_log_has_no_file_names(tmp_path, make_pdf, make_p7m):
     for name in ("Contratto Bianchi.pdf", "Allegato Bianchi.pdf"):
         (folder / name).write_bytes(make_pdf((595, 842, 0, None)))
         jobs.append(SignJob(folder / name, Kind.PADES))
-    api = FakeArss(make_p7m=make_p7m, fail_at={1: ServiceError(f"errore su {folder / 'Allegato Bianchi.pdf'}")})
+    api = FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf,
+                   fail_at={1: ServiceError(f"errore su {folder / 'Allegato Bianchi.pdf'}")})
     service.sign_batch(api, Account("mario.rossi", "firma", "X"), "pw", "12345678", jobs)
     for handler in logging.getLogger("firmaremota").handlers:
         handler.flush()

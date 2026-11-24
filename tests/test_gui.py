@@ -42,8 +42,8 @@ def store(configured):
 
 
 @pytest.fixture
-def api(make_p7m):
-    return FakeArss(make_p7m=make_p7m)
+def api(make_p7m, sign_pdf, make_cades_t, make_tsd, make_tsr):
+    return FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf, make_cades_t=make_cades_t, make_tsd=make_tsd, make_tsr=make_tsr)
 
 
 def wait_for_workers(qtbot, owner):
@@ -60,6 +60,8 @@ def window(qtbot, store, api):
     w.show_error = Recorder()
     w.open_url = Recorder()
     w.ask_login = Recorder(None)
+    # In-process instead of a spawned process: the tests' monkeypatched trust must stay visible.
+    w.verify_fn = lambda path, cancel=None, original=None: verify.verify_file(path, original=original)
     yield w
     wait_for_workers(qtbot, w)
 
@@ -85,10 +87,12 @@ def test_sign_pdf_with_stamp(window, api, qtbot, tmp_path, make_pdf):
     window.options.stamp.setChecked(True)
     window.options.corner_buttons[Position.TOP_LEFT].setChecked(True)
     window.options.text.setText("Visto")
+    window.options.timestamp.setChecked(False)
     window.options.sign.click()
     wait_for(qtbot, window, window.result)
     assert window.result.title.text() == "Fatto! 2 documenti firmati."
     assert (tmp_path / "a_firmato.pdf").exists() and (tmp_path / "b_firmato.pdf").exists()
+    assert api.tsa_seen == [(None, None)] * 2
     assert window.ask_otp.calls == [(2, 0, "", "Mario")]
     assert api.names()[:2] == ["list_certs", "open_session"]  # account checked before the OTP is used
     assert next(c for c in api.calls if c[0] == "sign_pdf")[4] == "Firmato digitalmente da Mario Rossi\nVisto"
@@ -101,8 +105,12 @@ def test_sign_other_file_single_result(window, qtbot, tmp_path):
     (tmp_path / "fattura.xml").write_bytes(b"<f/>")
     window.choose_files = Recorder([str(tmp_path / "fattura.xml")])
     window.home.sign_other.click()
+    assert window.stack.currentWidget() is window.options  # also for .p7m, now: the timestamp choice lives there
+    assert not window.options.stamp.isVisibleTo(window) and window.options.timestamp.isChecked()
+    assert window.options.title.text() == "Firma un file (.p7m)"
+    window.options.sign.click()
     wait_for(qtbot, window, window.result)
-    assert window.result.title.text() == "Fatto! Documento firmato."
+    assert window.result.title.text() == "Fatto! Documento firmato e marcato temporalmente."
     window.result.open_document.click()
     assert window.open_url.calls[-1] == (tmp_path / "fattura.xml.p7m",)
 
@@ -159,7 +167,7 @@ def test_partial_batch_and_retry(window, api, qtbot, tmp_path, make_pdf):
     window.stack.setCurrentWidget(window.home)
     window.result.retry.click()
     wait_for(qtbot, window, window.result)
-    assert window.result.title.text() == "Fatto! Documento firmato."
+    assert window.result.title.text() == "Fatto! Documento firmato e marcato temporalmente."  # timestamps are on by default
     assert len(window.ask_otp.calls) == 2 and (tmp_path / "b_firmato.pdf").exists()
 
 
@@ -246,10 +254,61 @@ def test_open_signed_p7m_and_extract(window, qtbot, tmp_path, make_p7m, pki, mon
     window.home.open_signed.click()
     wait_for(qtbot, window, window.verify_page)
     assert window.verify_page.title.text() == "✔  Firma valida"
+    assert window.verify_page.open_document.isVisibleTo(window) and window.verify_page.open_folder.isVisibleTo(window)
     window.verify_page.open_document.click()
     window.verify_page.open_document.click()
     assert window.open_url.calls == [(tmp_path / "contratto.pdf",), (tmp_path / "contratto.pdf",)]
     assert (tmp_path / "contratto.pdf").read_bytes() == PDF and not (tmp_path / "contratto (2).pdf").exists()
+    window.verify_page.open_folder.click()
+    assert window.open_url.calls[-1] == (tmp_path,) and not (tmp_path / "contratto (2).pdf").exists()
+
+
+def test_executable_content_is_extracted_but_never_launched(window, qtbot, tmp_path, make_p7m, pki, monkeypatch):
+    """The sender chose the inner name: a valid signature on `x.desktop` doesn't make it safe to open."""
+    monkeypatch.setattr(verify, "default_trust", lambda: RootsTrust(pki["ca"]))
+    signed = tmp_path / "nota.desktop.p7m"
+    signed.write_bytes(make_p7m(b"[Desktop Entry]\nExec=rm -rf ~\n"))
+    window.open_paths([str(signed)])
+    wait_for(qtbot, window, window.verify_page)
+    assert window.verify_page.title.text() == "✔  Firma valida"
+    assert not window.verify_page.open_document.isVisibleTo(window) and window.verify_page.open_folder.isVisibleTo(window)
+    items = [window.verify_page.details.item(i).text() for i in range(window.verify_page.details.count())]
+    assert any("non viene aperto automaticamente" in line and ".desktop" in line for line in items)
+    window.open_verified_document()  # even called directly
+    assert window.open_url.calls == []
+    window.verify_page.open_folder.click()
+    assert window.open_url.calls == [(tmp_path,)] and (tmp_path / "nota.desktop").exists()
+
+
+def test_unverifiable_signature_is_amber_not_green(window, qtbot, tmp_path, make_p7m, monkeypatch):
+    monkeypatch.setattr(verify, "default_trust", lambda: verify.NoTrust())
+    signed = tmp_path / "contratto.pdf.p7m"
+    signed.write_bytes(make_p7m(PDF))
+    window.open_paths([str(signed)])
+    wait_for(qtbot, window, window.verify_page)
+    assert window.verify_page.title.text() == "?  Firma NON verificabile"
+    assert "9a6700" in window.verify_page.title.styleSheet()  # amber, neither the green nor the red
+    items = [window.verify_page.details.item(i).text() for i in range(window.verify_page.details.count())]
+    assert any("elenco ufficiale dei certificatori non è disponibile" in line for line in items)
+
+
+def test_verification_can_be_cancelled(window, qtbot, tmp_path):
+    import threading
+
+    started = threading.Event()
+
+    def slow_verify(path, cancel=None, original=None):
+        started.set()
+        cancel.wait(5)
+        raise verify.FirmaError("Controllo annullato.")
+
+    window.verify_fn = slow_verify
+    window.verify(str(tmp_path / "x.p7m"))
+    assert window.progress.stop.isVisibleTo(window)
+    assert started.wait(5)
+    window.progress.stop.click()
+    qtbot.waitUntil(lambda: bool(window.show_error.calls), timeout=10000)
+    assert window.show_error.calls[0][1] == "Controllo annullato." and window.stack.currentWidget() is window.home
 
 
 def test_tampered_file_is_shown_invalid(window, qtbot, tmp_path, make_p7m, pki, monkeypatch):
@@ -360,6 +419,28 @@ def test_support_report(window, qtbot, api):
     assert PASSWORD not in text and "mario.rossi" not in text
 
 
+def test_support_checks_only_the_selected_account(window, qtbot, api, store):
+    add_profile(store, "Anna", "anna.bianchi@firma", "pw-anna")
+    window.show_support = Recorder()
+    window.home.support.click()
+    qtbot.waitUntil(lambda: bool(window.show_support.calls), timeout=10000)
+    text = window.show_support.calls[0][0]
+    assert "Credenziali «M***o»: accettate" in text and "Credenziali «A**a»" not in text
+    assert [c for c in api.calls if c[0] == "list_certs"] == [("list_certs", PASSWORD)]
+
+
+def test_dialogs_show_account_names_literally(qtbot):
+    from PySide6.QtWidgets import QLabel
+
+    from firmaremota.gui.dialogs import LoginDialog
+
+    for dialog in (OtpDialog(None, 1, 0, who="<b>Papà</b> <img src=x>"),
+                   LoginDialog(None, True, None, who="<b>Papà</b> <img src=x>")):
+        qtbot.addWidget(dialog)
+        (label,) = [w for w in dialog.findChildren(QLabel) if w.text().startswith("Account:")]
+        assert "&lt;b&gt;Papà&lt;/b&gt; &lt;img src=x&gt;" in label.text() and "<img" not in label.text()
+
+
 def test_startup_smoke_test(tmp_path):
     """What the installer runs: build and show the window, exit 0."""
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", XDG_STATE_HOME=str(tmp_path / "s"),
@@ -370,3 +451,180 @@ def test_startup_smoke_test(tmp_path):
             "from firmaremota.gui.app import main; raise SystemExit(main(['--prova-avvio']))")
     result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0 and "ok" in result.stdout
+
+
+def test_open_tsd_shows_timestamp_title(window, qtbot, tmp_path, make_tsd, make_p7m, pki, monkeypatch):
+    monkeypatch.setattr(verify, "default_trust", lambda: RootsTrust(pki["ca"]))
+    path = tmp_path / "contratto.pdf.p7m.tsd"
+    path.write_bytes(make_tsd(make_p7m(PDF)))
+    window.open_paths([str(path)])
+    wait_for(qtbot, window, window.verify_page)
+    assert window.verify_page.title.text() == "✔  Firma valida"  # a signature inside: the signature is the subject
+    items = [window.verify_page.details.item(i).text() for i in range(window.verify_page.details.count())]
+    assert any(line.startswith("Marca temporale sul documento:") for line in items)
+    window.verify_page.open_document.click()
+    assert window.open_url.calls == [(tmp_path / "contratto.pdf",)]
+    plain = tmp_path / "nota.txt.tsd"
+    plain.write_bytes(make_tsd(b"ciao"))
+    window.open_paths([str(plain)])
+    wait_for(qtbot, window, window.verify_page)
+    assert window.verify_page.title.text() == "✔  Marca temporale valida"
+
+
+def test_tsr_asks_for_the_original(window, qtbot, tmp_path, make_tsr, pki, monkeypatch):
+    monkeypatch.setattr(verify, "default_trust", lambda: RootsTrust(pki["ca"]))
+    (tmp_path / "altrove.txt").write_bytes(b"ciao")
+    tsr = tmp_path / "nota.txt.tsr"
+    tsr.write_bytes(make_tsr(b"ciao"))
+    window.choose_original = Recorder(str(tmp_path / "altrove.txt"))
+    window.open_paths([str(tsr)])
+    wait_for(qtbot, window, window.verify_page)
+    assert window.choose_original.calls == [("nota.txt.tsr",)]
+    assert window.verify_page.title.text() == "✔  Marca temporale valida"
+    assert not window.verify_page.open_document.isVisibleTo(window) and not window.verify_page.open_folder.isVisibleTo(window)
+    window.choose_original = Recorder(None)  # cancelled: back home, no error box
+    window.open_paths([str(tsr)])
+    qtbot.waitUntil(lambda: window.stack.currentWidget() is window.home, timeout=10000)
+    assert window.show_error.calls == []
+
+
+# --- marche temporali -------------------------------------------------------------------------------
+
+def test_sign_pdf_with_timestamp_passes_tsa_and_level(window, api, qtbot, tmp_path, make_pdf):
+    from firmaremota import verify
+    from firmaremota.models import TimestampType
+
+    window.choose_files = Recorder(pdfs(tmp_path, make_pdf, "a.pdf"))
+    window.home.sign_pdf.click()
+    assert window.options.timestamp.isChecked() and window.options.level.isEnabled()
+    assert [window.options.level.itemData(i) for i in range(window.options.level.count())] == ["T", "LT"]  # no TSD for PDFs
+    window.options.level.setCurrentIndex(1)
+    window.options.sign.click()
+    wait_for(qtbot, window, window.result)
+    assert window.result.title.text() == "Fatto! Documento firmato e marcato temporalmente."
+    (tsa, level) = api.tsa_seen[0]
+    assert tsa.user == "mario.rossi" and tsa.password == PASSWORD and level is TimestampType.LT
+    assert verify.has_timestamp(Kind.PADES, (tmp_path / "a_firmato.pdf").read_bytes())
+
+
+def test_options_timestamp_preset_from_profile(window, api, qtbot, store, tmp_path, make_pdf):
+    import dataclasses
+
+    from firmaremota import profiles
+
+    (profile,) = profiles.load_all(store)
+    profiles.upsert(store, [profile], dataclasses.replace(profile, timestamp=False))
+    window.reload_profiles() if hasattr(window, "reload_profiles") else None
+    window.current = profiles.load_all(store)[0]
+    window.choose_files = Recorder(pdfs(tmp_path, make_pdf, "a.pdf"))
+    window.home.sign_pdf.click()
+    assert not window.options.timestamp.isChecked() and not window.options.level.isEnabled()
+    window.options.sign.click()
+    wait_for(qtbot, window, window.result)
+    assert api.tsa_seen == [(None, None)] and window.result.title.text() == "Fatto! Documento firmato."
+
+
+def test_p7m_tsd_level_wraps(window, api, qtbot, tmp_path):
+    (tmp_path / "fattura.xml").write_bytes(b"<f/>")
+    window.choose_files = Recorder([str(tmp_path / "fattura.xml")])
+    window.home.sign_other.click()
+    assert [window.options.level.itemData(i) for i in range(window.options.level.count())] == ["T", "LT", "TSD"]
+    window.options.level.setCurrentIndex(2)
+    window.options.sign.click()
+    wait_for(qtbot, window, window.result)
+    assert (tmp_path / "fattura.xml.p7m.tsd").exists() and api.names().count("timestamp_file") == 1
+    window.result.open_document.click()
+    assert window.open_url.calls[-1] == (tmp_path / "fattura.xml.p7m.tsd",)
+
+
+def test_timestamp_button_makes_tsd_without_otp(window, api, qtbot, tmp_path):
+    from firmaremota import verify
+
+    (tmp_path / "nota.txt").write_bytes(b"ciao")
+    (tmp_path / "foto.jpg").write_bytes(b"finta")
+    window.choose_files = Recorder([str(tmp_path / "nota.txt"), str(tmp_path / "foto.jpg")])
+    window.ask_timestamp_format = Recorder("tsd")
+    window.home.timestamp_file.click()
+    wait_for(qtbot, window, window.result)
+    assert window.ask_timestamp_format.calls == [(2,)] and window.ask_otp.calls == []
+    assert window.result.title.text() == "Fatto! 2 documenti marcati."
+    assert api.names() == ["timestamp_file", "timestamp_file"]  # no account check with Aruba either
+    assert verify.verify_file(tmp_path / "nota.txt.tsd", verify.NoTrust()).content == b"ciao"
+    assert window.result.retry.text() == "Marca i rimanenti" and not window.result.retry.isVisibleTo(window)
+
+
+def test_timestamp_button_tsr_shows_the_note_and_cancel(window, api, qtbot, tmp_path):
+    (tmp_path / "nota.txt").write_bytes(b"ciao")
+    window.choose_files = Recorder([str(tmp_path / "nota.txt")])
+    window.ask_timestamp_format = Recorder(None)  # cancelled
+    window.home.timestamp_file.click()
+    assert api.calls == [] and window.stack.currentWidget() is window.home
+    window.ask_timestamp_format = Recorder("tsr")
+    window.home.timestamp_file.click()
+    wait_for(qtbot, window, window.result)
+    assert (tmp_path / "nota.txt.tsr").exists()
+    lines = [window.result.lines.item(i).text() for i in range(window.result.lines.count())]
+    assert any("documento originale" in line for line in lines)
+
+
+def test_timestamp_error_offers_retry_without_timestamp(window, api, qtbot, tmp_path, make_pdf, sign_pdf):
+    from firmaremota.errors import TimestampError
+
+    api.timestamp_error = TimestampError("TSA no")
+    window.choose_files = Recorder(pdfs(tmp_path, make_pdf, "a.pdf", "b.pdf"))
+    window.home.sign_pdf.click()
+    window.options.sign.click()
+    wait_for(qtbot, window, window.result)
+    assert window.result.title.text() == "Nessun documento è stato firmato."
+    assert window.result.retry.isVisibleTo(window) and window.result.retry.text() == "Firma i rimanenti"
+    window.result.retry.click()
+    assert window.stack.currentWidget() is window.options
+    assert not window.options.timestamp.isChecked() and "marca temporale" in window.options.note.text()
+    assert [window.options.files.item(i).text() for i in range(window.options.files.count())] == ["a.pdf", "b.pdf"]
+    window.options.sign.click()
+    wait_for(qtbot, window, window.result)
+    assert window.result.title.text() == "Fatto! 2 documenti firmati."
+
+
+def test_timestamp_format_dialog(qtbot):
+    from firmaremota.gui.dialogs import TimestampFormatDialog
+
+    dialog = TimestampFormatDialog(None, 3)
+    qtbot.addWidget(dialog)
+    assert dialog.value() == "tsd" and not dialog.note.isVisibleTo(dialog)
+    dialog.tsr.setChecked(True)
+    assert dialog.value() == "tsr" and dialog.note.isVisibleTo(dialog)
+
+
+def test_profile_dialog_timestamp_settings(qtbot, store, api):
+    from firmaremota import profiles
+    from firmaremota.models import TsaCredentials
+
+    (mario,) = profiles.load_all(store)
+    dialog = ProfileEditDialog(None, lambda: api, store, [mario], mario)
+    qtbot.addWidget(dialog)
+    assert dialog.timestamp.isChecked() and not dialog.tsa_separate.isChecked() and not dialog.tsa_user.isEnabled()
+    dialog.tsa_separate.setChecked(True)
+    dialog.check.click()  # separate account chosen but empty: refused before anything is sent
+    assert "account TSA" in dialog.status.text() and api.calls == []
+    dialog.tsa_user.setText("tsa-user")
+    dialog.tsa_password.setText("tsa-pw")
+    dialog.timestamp.setChecked(False)
+    dialog.check.click()
+    qtbot.waitUntil(lambda: dialog.result() == QDialog.DialogCode.Accepted, timeout=10000)
+    saved = profiles.load_all(store)[0]
+    assert saved.timestamp is False and profiles.tsa_account(store, saved) == TsaCredentials("tsa-user", "tsa-pw")
+    again = ProfileEditDialog(None, lambda: api, store, [saved], saved)
+    qtbot.addWidget(again)
+    assert again.tsa_separate.isChecked() and again.tsa_user.text() == "tsa-user" and again.tsa_password.text() == ""
+    again.tsa_separate.setChecked(False)
+    again.check.click()
+    qtbot.waitUntil(lambda: again.result() == QDialog.DialogCode.Accepted, timeout=10000)
+    assert profiles.tsa_account(store, profiles.load_all(store)[0]) is None
+
+
+def test_profiles_dialog_marks_accounts_without_timestamp(qtbot, store, api):
+    add_profile(store, "Anna", "anna.bianchi@firma", "pw", timestamp=False)
+    dialog = ProfilesDialog(None, lambda: api, store, profiles.load_all(store))
+    qtbot.addWidget(dialog)
+    assert "(senza marca temporale)" in dialog.list.item(1).text() and "senza marca" not in dialog.list.item(0).text()

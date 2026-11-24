@@ -8,7 +8,7 @@ import requests
 from lxml import etree
 from zeep.transports import Transport
 
-from firmaremota.models import SignerInfo
+from firmaremota.models import Kind, SignerInfo, TimestampType
 
 SESSION_ID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
 _ENV = "http://schemas.xmlsoap.org/soap/envelope/"
@@ -17,12 +17,18 @@ _ENV = "http://schemas.xmlsoap.org/soap/envelope/"
 class FakeArss:
     """Records every call; `fail_at` maps a sign-call number (0-based) to the error to raise."""
 
-    def __init__(self, make_p7m=None, open_error=None, fail_at=None, certs=None):
+    def __init__(self, make_p7m=None, open_error=None, fail_at=None, certs=None, sign_pdf=None, make_cades_t=None,
+                 make_tsd=None, make_tsr=None, timestamp_error=None):
         self.make_p7m = make_p7m
+        self.sign_pdf_fn = sign_pdf  # real PAdES like Aruba's (original + incremental update); None = fake bytes
+        self.make_cades_t = make_cades_t  # CAdES with a timestamp token, for requests with a TSA
+        self.make_tsd, self.make_tsr = make_tsd, make_tsr
+        self.timestamp_error = timestamp_error  # raised by every call that involves the TSA
         self.open_error = open_error
         self.fail_at = fail_at or {}
         self.certs = CERTS if certs is None else certs
         self.calls: list[tuple] = []
+        self.tsa_seen: list[tuple] = []  # (TsaCredentials or None, TimestampType or None) per signing call
         self._signs = 0
 
     def _sign_call(self):
@@ -49,15 +55,32 @@ class FakeArss:
     def close_session(self, auth, session_id):
         self.calls.append(("close_session", session_id))
 
+    def _tsa(self, auth):
+        self.tsa_seen.append((auth.tsa, auth.level))
+        marked = auth.tsa is not None and auth.level in (TimestampType.T, TimestampType.LT)
+        if marked and self.timestamp_error:
+            raise self.timestamp_error
+        return marked
+
     def sign_pdf(self, auth, pdf, stamp=None, text="", image=None, show_date=True):
         self.calls.append(("sign_pdf", auth.otp, auth.session_id, stamp, text))
         self._sign_call()
+        marked = self._tsa(auth)
+        if self.sign_pdf_fn:
+            return self.sign_pdf_fn(pdf, timestamp=marked) if marked else self.sign_pdf_fn(pdf)
         return pdf + b"\n% firmato\n"
 
     def sign_cades(self, auth, data):
         self.calls.append(("sign_cades", auth.otp, auth.session_id))
         self._sign_call()
-        return self.make_p7m(data)
+        marked = self._tsa(auth)
+        return self.make_cades_t(data) if marked and self.make_cades_t else self.make_p7m(data)
+
+    def timestamp_file(self, tsa, data, fmt):
+        self.calls.append(("timestamp_file", fmt, len(data)))
+        if self.timestamp_error:
+            raise self.timestamp_error
+        return (self.make_tsd if fmt is Kind.TSD else self.make_tsr)(data)
 
     def names(self):
         return [c[0] for c in self.calls]

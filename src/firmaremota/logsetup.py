@@ -107,10 +107,9 @@ def setup(debug: bool = False, console: bool = False, directory: Path | None = N
     logger.handlers[:] = handlers
     logger.setLevel(logging.DEBUG if debug else logging.INFO)
     logger.propagate = False
-    for name in _NOISY:
-        logging.getLogger(name).setLevel(logging.WARNING)
-    # pyHanko logs full tracebacks for expected outcomes (e.g. an untrusted chain): file only.
-    for name in _LIBRARIES:
+    # Third-party loggers: never below WARNING (zeep dumps whole SOAP envelopes at DEBUG), and only
+    # through the redacting file handler, never to an unredacted stderr via the root logger.
+    for name in _NOISY + _LIBRARIES:
         library = logging.getLogger(name)
         library.handlers[:] = [handler]
         library.setLevel(logging.WARNING)

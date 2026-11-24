@@ -6,7 +6,7 @@
 # must already be pushed to the repository (packaging/arch/release.sh does both).
 pkgname=aruba-firma
 _reponame=aruba-firma-digitale-remota-otp
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Firma digitale remota Aruba: firma, verifica ed estrai documenti (riga di comando e interfaccia grafica)"
 url="https://github.com/diegofanesi/$_reponame"
@@ -23,6 +23,7 @@ depends=(
   'python-lxml'
   'pyside6'                # the graphical interface
   'hicolor-icon-theme'
+  'shared-mime-info'
   # needed by the bundled libraries below
   'python-cryptography'
   'python-oscrypto'
@@ -69,6 +70,7 @@ _vendored=(
 # `./install.sh` never needs a pushed tag. Keep both as single, whole-line assignments: the two
 # `sed -i '/^_pkgsource/s/.../'` calls in install.sh match on that.
 _pkgsource="$pkgname-$pkgver.tar.gz::https://github.com/diegofanesi/$_reponame/archive/refs/tags/v$pkgver.tar.gz"
+# Pinned by packaging/arch/release.sh right after the tag is pushed (the value below is v0.1.0's until then).
 _pkgsource_sha256='c7646d9fc994ceeea32ee2db8244372c9733f0a37f86295c941b1f182ec51974'
 
 source=("$_pkgsource"
@@ -110,6 +112,9 @@ package() {
   cp -r "$srcdir/vendor" "$pkgdir/usr/lib/$pkgname/vendor"
   python -m compileall -q -d "/usr/lib/$pkgname/vendor" "$pkgdir/usr/lib/$pkgname/vendor"
   install -Dm644 packaging/arch/aruba-firma/aruba-firma.desktop -t "$pkgdir/usr/share/applications"
+  # .tsd/.tsr are unknown to shared-mime-info: declare them so the .desktop MimeType= association works
+  # (pacman's update-mime-database hook refreshes the database on install).
+  install -Dm644 packaging/arch/aruba-firma/aruba-firma-mime.xml "$pkgdir/usr/share/mime/packages/aruba-firma.xml"
   install -Dm644 src/firmaremota/gui/aruba-firma.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/aruba-firma.svg"
   install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
   install -Dm644 README.md docs/privacy.md -t "$pkgdir/usr/share/doc/$pkgname"

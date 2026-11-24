@@ -2,9 +2,9 @@ import threading
 
 import pytest
 
-from firmaremota import config, service
-from firmaremota.errors import CredentialsError, OtpError, ServiceError
-from firmaremota.models import Account, Kind, Position, ResolvedStamp, SignJob, StampSpec
+from firmaremota import config, service, verify
+from firmaremota.errors import CredentialsError, OtpError, ServiceError, TimestampError
+from firmaremota.models import Account, Kind, Position, ResolvedStamp, SignJob, StampSpec, TimestampType, TsaCredentials
 
 from .fakes import SESSION_ID, FakeArss, signer_info
 
@@ -51,8 +51,8 @@ def test_preflight_finds_every_problem(docs, make_pdf):
     assert service.preflight([]) == ["Nessun file da firmare."]
 
 
-def test_sign_batch_one_otp_for_everything(docs, make_p7m):
-    api = FakeArss(make_p7m=make_p7m)
+def test_sign_batch_one_otp_for_everything(docs, make_p7m, sign_pdf):
+    api = FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf)
     results = service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs))
     assert [r.ok for r in results] == [True, True, True]
     assert [r.output.name for r in results] == ["a_firmato.pdf", "b_firmato.pdf", "c.xml.p7m"]
@@ -63,8 +63,8 @@ def test_sign_batch_one_otp_for_everything(docs, make_p7m):
     assert config.load_state().auth_failures == 0
 
 
-def test_stamp_is_resolved_and_labelled(docs, make_p7m):
-    api = FakeArss(make_p7m=make_p7m)
+def test_stamp_is_resolved_and_labelled(docs, make_p7m, sign_pdf):
+    api = FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf)
     spec = StampSpec(position=Position.BOTTOM_LEFT, text="Per accettazione")
     service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs, spec)[:2], signer_name="Mario Rossi")
     first, second = api.calls[1], api.calls[2]
@@ -73,19 +73,19 @@ def test_stamp_is_resolved_and_labelled(docs, make_p7m):
     assert first[4] == "Firmato digitalmente da Mario Rossi\nPer accettazione"
 
 
-def test_refused_otp_counts_and_signs_nothing(docs):
+def test_refused_otp_counts_and_signs_nothing(docs, sign_pdf):
     api = FakeArss(open_error=OtpError("no"))
     for expected in (1, 2):
         with pytest.raises(OtpError):
             service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs))
         assert service.auth_failures() == expected
     assert set(api.names()) == {"open_session"}
-    service.sign_batch(FakeArss(make_p7m=lambda d: d), ACCOUNT, "pw", OTP, jobs(docs)[:1])  # one accepted OTP
+    service.sign_batch(FakeArss(sign_pdf=sign_pdf), ACCOUNT, "pw", OTP, jobs(docs)[:1])  # one accepted OTP
     assert service.auth_failures() == 0
 
 
-def test_service_error_stops_the_batch_and_closes_the_session(docs, make_p7m):
-    api = FakeArss(make_p7m=make_p7m, fail_at={1: ServiceError("guasto")})
+def test_service_error_stops_the_batch_and_closes_the_session(docs, make_p7m, sign_pdf):
+    api = FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf, fail_at={1: ServiceError("guasto")})
     results = service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs))
     assert [r.ok for r in results] == [True, False, False]
     assert results[1].error.message == "guasto"
@@ -94,30 +94,84 @@ def test_service_error_stops_the_batch_and_closes_the_session(docs, make_p7m):
     assert not (docs / "b_firmato.pdf").exists()
 
 
-def test_local_file_problem_skips_only_that_file(docs, make_p7m):
+def test_local_file_problem_skips_only_that_file(docs, make_p7m, sign_pdf):
     work = jobs(docs)
     (docs / "a.pdf").unlink()  # disappeared after preflight
-    results = service.sign_batch(FakeArss(make_p7m=make_p7m), ACCOUNT, "pw", OTP, work)
+    results = service.sign_batch(FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf), ACCOUNT, "pw", OTP, work)
     assert [r.ok for r in results] == [False, True, True]
 
 
-def test_cancel(docs, make_p7m):
+def test_cancel(docs, make_p7m, sign_pdf):
     cancel = threading.Event()
     cancel.set()
-    api = FakeArss(make_p7m=make_p7m)
+    api = FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf)
     results = service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs), cancel=cancel)
     assert all(r.error.message == service.CANCELLED for r in results)
     assert api.names() == ["open_session", "close_session"]
 
 
-def test_progress_and_output_folder(docs, make_p7m, tmp_path):
+def test_progress_and_output_folder(docs, make_p7m, tmp_path, sign_pdf):
     out = tmp_path / "firmati"
     out.mkdir()
     seen = []
-    service.sign_batch(FakeArss(make_p7m=make_p7m), ACCOUNT, "pw", OTP, jobs(docs), out_dir=out,
+    service.sign_batch(FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf), ACCOUNT, "pw", OTP, jobs(docs), out_dir=out,
                        progress=lambda done, total, name: seen.append((done, total, name)))
     assert seen == [(0, 3, "a.pdf"), (1, 3, "b.pdf"), (2, 3, "c.xml"), (3, 3, "")]
     assert sorted(p.name for p in out.iterdir()) == ["a_firmato.pdf", "b_firmato.pdf", "c.xml.p7m"]
+
+
+def test_huge_file_is_a_preflight_problem(docs, monkeypatch):
+    monkeypatch.setattr(service.files, "MAX_SIGN_SIZE", 5)
+    problems = service.preflight(jobs(docs))
+    assert len(problems) == 3 and all("troppo grande" in p for p in problems)
+
+
+def test_file_changed_after_approval_is_not_signed(docs, make_p7m, sign_pdf, make_pdf):
+    """The user approves a list of files and types the OTP; what is sent must be exactly what was approved."""
+    work = service.fingerprint(jobs(docs))
+    assert all(len(job.digest) == 64 for job in work)
+    (docs / "a.pdf").write_bytes(make_pdf((300, 300, 0, None)))  # swapped between approval and sending
+    api = FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf)
+    results = service.sign_batch(api, ACCOUNT, "pw", OTP, work)
+    assert [r.ok for r in results] == [False, True, True]
+    assert "è cambiato dopo il controllo iniziale" in results[0].error.message
+    assert api.names().count("sign_pdf") == 1 and not (docs / "a_firmato.pdf").exists()
+
+
+def test_returned_document_must_be_ours(docs, make_p7m, sign_pdf, make_pdf):
+    """A signed file that doesn't contain exactly the bytes we sent is never saved."""
+    other = sign_pdf(make_pdf((300, 300, 0, None)))
+    api = FakeArss(make_p7m=lambda d: make_p7m(d + b"!"), sign_pdf=lambda pdf: other)
+    results = service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs))
+    assert [r.ok for r in results] == [False, False, False]
+    assert all("non corrisponde a quello inviato" in r.error.message for r in results[:1])
+    assert "non corrisponde a quello inviato" in results[2].error.message or results[2].error.message == service.NOT_REACHED
+    assert not any(p.name.endswith(("_firmato.pdf", ".p7m")) for p in docs.iterdir())
+
+
+def test_returned_signature_must_verify(docs, make_p7m, sign_pdf):
+    """Right bytes, broken signature (e.g. a damaged transfer): refused, so the user never keeps a bad file."""
+    def broken_pdf(pdf):
+        signed = sign_pdf(pdf)
+        tail = signed[len(pdf):]
+        return pdf + tail.replace(b"/ByteRange", b"/ByteRangX", 1)
+
+    def broken_p7m(data):
+        p7m = make_p7m(data)
+        return p7m[:-20] + bytes(b ^ 0xFF for b in p7m[-20:])  # flip the end of the signature value
+
+    results = service.sign_batch(FakeArss(make_p7m=broken_p7m, sign_pdf=broken_pdf), ACCOUNT, "pw", OTP, jobs(docs))
+    assert not results[0].ok and "controllo di integrità" in results[0].error.message
+    assert not any(p.name.endswith(("_firmato.pdf", ".p7m")) for p in docs.iterdir())
+
+
+def test_returned_matches_rules(make_p7m):
+    assert service.returned_matches(Kind.PADES, b"%PDF-1.7 x", b"%PDF-1.7 x\n<<firma>>")
+    assert not service.returned_matches(Kind.PADES, b"%PDF-1.7 x", b"%PDF-1.7 x")  # nothing appended
+    assert not service.returned_matches(Kind.PADES, b"%PDF-1.7 x", b"%PDF-1.7 y\n<<firma>>")
+    assert service.returned_matches(Kind.CADES, b"dati", make_p7m(b"dati"))
+    assert not service.returned_matches(Kind.CADES, b"dati", make_p7m(b"dati!"))
+    assert not service.returned_matches(Kind.CADES, b"dati", b"non una busta")
 
 
 def test_password_only_check_and_the_failure_counter():
@@ -145,3 +199,107 @@ def test_pick_certificate_after_renewal():
         service.pick_certificate([expired])
     with pytest.raises(CredentialsError, match="non ha trovato"):
         service.pick_certificate([])
+
+
+# --- timestamps -----------------------------------------------------------------------------------
+
+TSA = TsaCredentials("mario.rossi", "pw")
+
+
+@pytest.fixture
+def api_t(make_p7m, sign_pdf, make_cades_t, make_tsd, make_tsr):
+    return FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf, make_cades_t=make_cades_t, make_tsd=make_tsd, make_tsr=make_tsr)
+
+
+@pytest.mark.parametrize("level", [TimestampType.T, TimestampType.LT])
+def test_sign_batch_passes_tsa_and_level_and_outputs_have_timestamps(docs, api_t, level):
+    results = service.sign_batch(api_t, ACCOUNT, "pw", OTP, jobs(docs), tsa=TSA, level=level)
+    assert [r.ok for r in results] == [True, True, True]
+    assert api_t.tsa_seen == [(TSA, level)] * 3
+    for result in results:
+        assert verify.has_timestamp(result.job.kind, result.output.read_bytes())
+    assert [r.output.name for r in results] == ["a_firmato.pdf", "b_firmato.pdf", "c.xml.p7m"]
+
+
+def test_no_timestamp_requested_means_none_asked(docs, api_t):
+    results = service.sign_batch(api_t, ACCOUNT, "pw", OTP, jobs(docs))
+    assert api_t.tsa_seen == [(None, None)] * 3
+    assert not any(verify.has_timestamp(r.job.kind, r.output.read_bytes()) for r in results)
+
+
+def test_missing_timestamp_is_refused_and_stops_batch(docs, make_p7m, sign_pdf):
+    """Aruba answers with a plain signature although a timestamp was asked for: nothing is saved."""
+    api = FakeArss(make_p7m=make_p7m, sign_pdf=lambda pdf, timestamp=False: sign_pdf(pdf))  # ignores the request
+    results = service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs), tsa=TSA, level=TimestampType.T)
+    assert [r.ok for r in results] == [False, False, False]
+    assert isinstance(results[0].error, TimestampError) and "senza la marca temporale" in results[0].error.message
+    assert "selfcare" in results[0].error.message and results[1].error.message == service.NOT_REACHED
+    assert not any(p.name.endswith(("_firmato.pdf", ".p7m")) for p in docs.iterdir())
+    assert api.names()[-1] == "close_session"
+
+
+def test_tsa_refusal_is_a_timestamp_error_and_not_an_auth_failure(docs, make_p7m, sign_pdf):
+    api = FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf, timestamp_error=TimestampError("TSA no"))
+    results = service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs), tsa=TSA, level=TimestampType.T)
+    assert isinstance(results[0].error, TimestampError) and service.auth_failures() == 0
+
+
+def test_cades_tsd_wraps_the_signed_p7m(docs, api_t):
+    results = service.sign_batch(api_t, ACCOUNT, "pw", OTP, [SignJob(docs / "c.xml", Kind.CADES)],
+                                 tsa=TSA, level=TimestampType.TSD)
+    (result,) = results
+    assert result.ok and result.output.name == "c.xml.p7m.tsd"
+    assert api_t.tsa_seen == [(None, None)]  # the signature itself is a plain one...
+    assert api_t.names() == ["open_session", "sign_cades", "timestamp_file", "close_session"]  # ...then wrapped
+    report = verify.verify_file(result.output, verify.NoTrust())
+    assert report.kind is Kind.TSD and report.content == b"<fattura/>" and len(report.timestamps) == 1
+
+
+def test_tsd_level_refused_for_pdf_in_preflight(docs):
+    problems = service.preflight(jobs(docs), level=TimestampType.TSD)
+    assert len(problems) == 1 and "TSD" in problems[0] and ".p7m" in problems[0]
+    assert service.preflight([SignJob(docs / "c.xml", Kind.CADES)], level=TimestampType.TSD) == []
+
+
+def test_wrapping_refuses_a_tsd_about_other_bytes(docs, make_p7m, make_tsd):
+    api = FakeArss(make_p7m=make_p7m, make_tsd=lambda data: make_tsd(data + b"!"))
+    results = service.sign_batch(api, ACCOUNT, "pw", OTP, [SignJob(docs / "c.xml", Kind.CADES)],
+                                 tsa=TSA, level=TimestampType.TSD)
+    assert not results[0].ok and "non corrisponde" in results[0].error.message
+    assert not any(p.suffix == ".tsd" for p in docs.iterdir())
+
+
+def test_timestamp_batch_outputs_tsd_and_tsr(docs, api_t):
+    work = service.fingerprint([SignJob(docs / "c.xml", Kind.TSD), SignJob(docs / "a.pdf", Kind.TSR)])
+    assert service.preflight(work) == []
+    results = service.timestamp_batch(api_t, TSA, work)
+    assert [r.output.name for r in results] == ["c.xml.tsd", "a.pdf.tsr"]
+    assert api_t.names() == ["timestamp_file", "timestamp_file"]  # no session, no OTP
+    assert verify.verify_file(docs / "c.xml.tsd", verify.NoTrust()).content == b"<fattura/>"
+    tsr = verify.verify_file(docs / "a.pdf.tsr", verify.NoTrust())  # finds a.pdf next to it
+    assert tsr.kind is Kind.TSR and tsr.timestamps[0].intact
+
+
+def test_timestamp_batch_refuses_mismatched_content_and_broken_tokens(docs, make_tsd, make_tsr, make_token):
+    from firmaremota import tst
+
+    api = FakeArss(make_tsd=lambda data: make_tsd(data + b"!"), make_tsr=lambda data: tst.build_tsr(make_token(data + b"!")))
+    results = service.timestamp_batch(api, TSA, [SignJob(docs / "c.xml", Kind.TSD), SignJob(docs / "a.pdf", Kind.TSR)])
+    assert not results[0].ok and "non corrisponde" in results[0].error.message
+    assert results[1].error.message == service.NOT_REACHED  # a service problem stops the batch
+    only_tsr = service.timestamp_batch(api, TSA, [SignJob(docs / "a.pdf", Kind.TSR)])
+    assert not only_tsr[0].ok and "integrità" in only_tsr[0].error.message
+    assert not any(p.suffix in (".tsd", ".tsr") for p in docs.iterdir())
+
+
+def test_timestamp_batch_cancel_progress_and_changed_file(docs, api_t, make_pdf):
+    seen = []
+    cancel = threading.Event()
+    cancel.set()
+    results = service.timestamp_batch(api_t, TSA, [SignJob(docs / "c.xml", Kind.TSD)], cancel=cancel,
+                                      progress=lambda d, t, n: seen.append((d, t, n)))
+    assert results[0].error.message == service.CANCELLED and api_t.calls == [] and seen == [(1, 1, "")]
+    work = service.fingerprint([SignJob(docs / "a.pdf", Kind.TSD)])
+    (docs / "a.pdf").write_bytes(make_pdf((300, 300, 0, None)))
+    results = service.timestamp_batch(api_t, TSA, work)
+    assert not results[0].ok and "è cambiato" in results[0].error.message and api_t.calls == []

@@ -113,13 +113,15 @@ def _certificates(api, store, available: list[profiles.Profile]) -> list[Line]:
     return lines
 
 
-def report(api, check_credentials: bool = False) -> list[Line]:
-    """All local checks; with `check_credentials` it also asks Aruba about each saved account (no OTP)."""
+def report(api, check_credentials: bool = False, only_profile_id: str | None = None) -> list[Line]:
+    """All local checks; with `check_credentials` it also asks Aruba (no OTP) to accept the saved
+    password of the account `only_profile_id` (every saved account when None)."""
     store = credentials.get_store()
     account_lines, available = _accounts(store)
     lines = _system() + account_lines + _failures() + _service(api) + _trust_list()
     if check_credentials and available:
-        lines += _certificates(api, store, available)
+        chosen = [p for p in available if only_profile_id is None or p.id == only_profile_id]
+        lines += _certificates(api, store, chosen)
     lines.append(Line(INFO, "Registro", str(logsetup.log_path())))
     return lines
 

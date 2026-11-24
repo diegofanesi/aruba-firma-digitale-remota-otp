@@ -56,7 +56,7 @@ def test_empty_batch_never_opens_a_session():
 @pytest.mark.parametrize("otp", ["١٢٣٤٥٦٧٨", "１２３４５６７８", "12345678x"])
 def test_cli_otp_accepts_ascii_digits_only(monkeypatch, otp):
     answers = iter([otp, "12345678"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": next(answers))
     assert cli._ask_otp() == "12345678"
 
 
@@ -100,11 +100,11 @@ def test_multi_valued_name_attributes():
 
 def test_unreadable_signature_is_a_file_error(monkeypatch):
     class ExplodingTrust(verify.NoTrust):
-        def context(self, *, strict_revocation):
+        def offline_context(self, moment=None):
             raise RuntimeError("formato sconosciuto")
 
     with pytest.raises(FileError, match="non è leggibile"):
-        verify._with_revocation_fallback(lambda ctx: None, ExplodingTrust())
+        verify.validate_in_phases(lambda ctx: None, ExplodingTrust())
 
 
 def test_cli_main_handles_closed_stdin_and_surprises(monkeypatch, capsys, tmp_path):
@@ -144,12 +144,12 @@ def test_window_refuses_to_close_while_a_worker_runs(qtbot, monkeypatch, configu
 
     release = threading.Event()
 
-    def slow_verify(path, trust=None):
+    def slow_verify(path, cancel=None, original=None):
         release.wait(5)
         raise FileError("fatto")
 
-    monkeypatch.setattr(verify, "verify_file", slow_verify)
     window = MainWindow(lambda: FakeArss())
+    window.verify_fn = slow_verify
     qtbot.addWidget(window)
     window.show_error = lambda *a: None
     window.verify(str(tmp_path / "x.p7m"))

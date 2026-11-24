@@ -92,8 +92,8 @@ def test_elenco(env, capsys):
     add_profile(env.store, "Anna", "anna.bianchi@frStudio")
     assert cli.main(["configura", "--elenco"]) == 0
     out = capsys.readouterr().out
-    assert "Mario: mario.rossi@firma (password salvata)" in out
-    assert "Anna: anna.bianchi@frStudio (password non salvata)" in out
+    assert "Mario: mario.rossi@firma (password salvata; marca temporale: sì (credenziali di firma))" in out
+    assert "Anna: anna.bianchi@frStudio (password non salvata; marca temporale: sì (credenziali di firma))" in out
     env.store.data.clear()
     assert cli.main(["configura", "--elenco"]) == 0
     assert "Nessun account salvato" in capsys.readouterr().out
@@ -159,16 +159,24 @@ def test_diagnostica_all_good(env, capsys):
     assert env.api.calls == []  # no credentials sent without --credenziali
 
 
-def test_diagnostica_checks_every_saved_account(env, capsys):
-    add_profile(env.store, "Mario", "mario.rossi@firma", PASSWORD)
+def test_diagnostica_checks_only_the_chosen_account(env, capsys):
+    """One account per run: a run on behalf of someone else must not send every saved password to Aruba."""
+    mario = add_profile(env.store, "Mario", "mario.rossi@firma", PASSWORD)
     add_profile(env.store, "Anna", "anna.bianchi@firma")  # no password: can't be checked
+    add_profile(env.store, "Luigi", "luigi.verdi@firma", "pw-luigi")
+    config.save(config.Settings(last_profile=mario.id))
     env.api.certs = [("x", signer_info("Mario Rossi", days_left=20))]
     assert cli.main(["diagnostica", "--credenziali"]) == 0
     out = capsys.readouterr().out
     assert "[AVVISO]  Credenziali «M***o»: accettate; il certificato scade il" in out
     assert "[AVVISO]  Account «A**a»: a**********i@firma, password non salvata" in out
-    assert "Credenziali «A**a»" not in out
+    assert "Credenziali «A**a»" not in out and "Credenziali «L***i»" not in out
     assert env.api.calls == [("list_certs", PASSWORD)]
+    env.api.calls.clear()
+    assert cli.main(["diagnostica", "--credenziali", "--account", "luigi"]) == 0
+    assert "Credenziali «L***i»: accettate" in capsys.readouterr().out
+    assert env.api.calls == [("list_certs", "pw-luigi")]
+    assert cli.main(["diagnostica", "--credenziali", "--account", "Nessuno"]) == 3
 
 
 def test_diagnostica_problems(env, capsys, monkeypatch):
@@ -192,7 +200,40 @@ def test_report_text_has_no_secrets(env):
     assert PASSWORD not in text and "mario.rossi" not in text and "Mario" not in text
 
 
-@pytest.mark.parametrize("command", ["pdf", "p7m", "verifica", "estrai", "configura", "diagnostica", "gui"])
+def test_configura_marca_options(env, capsys):
+    from firmaremota.models import TsaCredentials
+
+    profile = add_profile(env.store, "Mario", "mario.rossi@firma", PASSWORD)
+    assert cli.main(["configura", "--elenco"]) == 0
+    assert "marca temporale: sì (credenziali di firma)" in capsys.readouterr().out
+    assert cli.main(["configura", "--marca", "no"]) == 0
+    assert profiles.load_all(env.store)[0].timestamp is False and "disattivata" in capsys.readouterr().out
+    assert cli.main(["configura", "--elenco"]) == 0
+    assert "marca temporale: no" in capsys.readouterr().out
+    assert cli.main(["configura", "--marca", "si"]) == 0
+    assert profiles.load_all(env.store)[0].timestamp is True
+    env.replies["input"] = ["", "https://tsa.example/ts"]  # Account TSA: keep the username; a server address
+    env.replies["getpass"] = ["Pw-tsa"]
+    assert cli.main(["configura", "--credenziali-marca"]) == 0
+    assert profiles.tsa_account(env.store, profile) == TsaCredentials("mario.rossi", "Pw-tsa", "https://tsa.example/ts")
+    assert env.api.calls == []  # nothing is checked with Aruba: every attempt would spend a mark
+    assert "consuma una marca" in capsys.readouterr().out
+    assert cli.main(["configura", "--elenco"]) == 0
+    assert "marca temporale: sì (account TSA)" in capsys.readouterr().out
+    assert cli.main(["configura", "--dimentica-credenziali-marca"]) == 0
+    assert profiles.tsa_account(env.store, profile) is None
+    assert cli.main(["configura", "--rimuovi"]) == 0 and set(env.store.data) <= {profiles.INDEX_KEY}  # tsa entry gone too
+
+
+def test_configura_mentions_the_timestamp_default(env, capsys):
+    env.replies["input"] = ["mario.rossi@firma", "", ""]
+    env.replies["getpass"] = ["Pw-1", "Pw-1"]
+    assert cli.main(["configura"]) == 0
+    assert "Marca temporale: attiva" in capsys.readouterr().out
+    assert profiles.load_all(env.store)[0].timestamp is True
+
+
+@pytest.mark.parametrize("command", ["pdf", "p7m", "marca", "verifica", "estrai", "configura", "diagnostica", "gui"])
 def test_every_help_is_italian(command, capsys):
     with pytest.raises(SystemExit) as exc:
         cli.main([command, "--help"])

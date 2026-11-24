@@ -70,18 +70,28 @@ def _date(value: dt.datetime) -> str:
 def check_lines(check) -> list[str]:
     """Italian description of one SignatureCheck: verdict first, then details and problems."""
     s = check.signer
-    lines = ["FIRMA VALIDA" if check.ok else "FIRMA NON VALIDA"]
+    lines = [VERDICT_TITLES[check.verdict]]
     who = s.name + (f" (codice fiscale {s.fiscal_code})" if s.fiscal_code else "")
     lines.append(f"Firmatario: {who}")
     if s.signing_time:
         lines.append(f"Firmato il: {s.signing_time.astimezone():%d/%m/%Y alle %H:%M}")
+    if check.timestamp:
+        lines.append(timestamp_line(check.timestamp))
     lines.append(f"Certificato emesso da {s.issuer}, valido fino al {_date(s.not_after)}")
+    if check.valid_at and check.trusted and s.not_after < dt.datetime.now(dt.timezone.utc):
+        lines.append(f"Il certificato è scaduto il {_date(s.not_after)}, ma la marca temporale prova che la firma "
+                     f"esisteva già il {_date(check.valid_at)}, quando era valido: la firma vale.")
+    if check.revoked_after_poe:
+        lines.append("Il certificato è stato revocato dopo la marca temporale: la firma, fatta prima, vale.")
     if not check.intact:
         lines.append("Problema: il documento è stato modificato dopo la firma.")
     elif not check.valid:
         lines.append("Problema: la firma non corrisponde al certificato del firmatario.")
     if check.revoked:
         lines.append("Problema: il certificato del firmatario è stato revocato.")
+    elif not check.trust_checked:
+        lines.append("Non verificabile: l'elenco ufficiale dei certificatori non è disponibile, quindi non si "
+                     "può sapere se il certificato è di un certificatore riconosciuto.")
     elif not check.trusted:
         if s.not_after < dt.datetime.now(dt.timezone.utc):
             lines.append(f"Problema: il certificato del firmatario è scaduto il {_date(s.not_after)}.")
@@ -89,8 +99,10 @@ def check_lines(check) -> list[str]:
             lines.append("Problema: il certificato non risulta emesso da un certificatore riconosciuto.")
     if not check.covers_document:
         lines.append("Problema: il PDF è stato modificato dopo questa firma in modo non consentito.")
-    if check.trusted and not check.revocation_checked:
-        lines.append("Avviso: non è stato possibile controllare se il certificato è stato revocato (sei offline?).")
+    if check.trust_checked and check.trusted and not check.revocation_checked:
+        lines.append("Non verificabile: non è stato possibile controllare se il certificato è stato revocato "
+                     "(sei offline, o il servizio del certificatore non risponde). Riprova più tardi: "
+                     "finché il controllo non riesce, la firma non va considerata valida.")
     if check.qualified is True:
         lines.append("Tipo: firma elettronica qualificata (firma digitale).")
     elif check.qualified is False:
@@ -98,10 +110,50 @@ def check_lines(check) -> list[str]:
     return lines
 
 
+VERDICT_TITLES = {
+    "valida": "FIRMA VALIDA",
+    "non valida": "FIRMA NON VALIDA",
+    "non verificabile": "FIRMA NON VERIFICABILE",
+}
+TIMESTAMP_TITLES = {
+    "valida": "MARCA TEMPORALE VALIDA",
+    "non valida": "MARCA TEMPORALE NON VALIDA",
+    "non verificabile": "MARCA TEMPORALE NON VERIFICABILE",
+}
+def verdict_title(report) -> str:
+    """The report's headline: about the signature(s), or about the timestamp(s) when that is all there is
+    (a .tsd around a .p7m is still, first of all, a signed document)."""
+    return (TIMESTAMP_TITLES if not report.checks else VERDICT_TITLES)[report.verdict]
+
+
+def timestamp_line(info, label: str = "Marca temporale") -> str:
+    """One line about a timestamp: when, who issued it, and whether it counts."""
+    line = f"{label}: {info.time.astimezone():%d/%m/%Y alle %H:%M} ({info.authority})"
+    if not (info.intact and info.valid):
+        return line + " — NON VALIDA: non corrisponde ai dati a cui è associata."
+    if not info.trust_checked:
+        return line + " — non verificabile: elenco dei certificatori non disponibile."
+    if not info.trusted:
+        return line + " — NON riconosciuta: l'autorità non è nell'elenco ufficiale, non vale come riferimento temporale."
+    if info.qualified is True:
+        line += " — qualificata"
+    elif info.qualified is False:
+        line += " — non qualificata"
+    if not info.revocation_checked:
+        line += " (revoca dell'autorità non verificata)"
+    return line
+
+
+def timestamp_lines(report) -> list[str]:
+    """Document-level timestamps (PDF document timestamps, .tsd/.tsr tokens)."""
+    return [timestamp_line(t, "Marca temporale sul documento") for t in report.timestamps]
+
+
 def trust_list_line(report) -> str:
+    prefix = f"Verifica alla data del {_date(report.at)}. " if report.at else ""
     if report.trust_list_date is None:
-        return "Elenco ufficiale dei certificatori non disponibile: l'attendibilità non è stata verificata."
+        return prefix + "Elenco ufficiale dei certificatori non disponibile: l'attendibilità non è stata verificata."
     when = f"{report.trust_list_date.astimezone():%d/%m/%Y}"
     if report.trust_list_stale:
-        return f"Verifica fatta con l'elenco ufficiale dei certificatori del {when} (non è stato possibile aggiornarlo)."
-    return f"Verifica fatta con l'elenco ufficiale dei certificatori (AgID) aggiornato al {when}."
+        return prefix + f"Verifica fatta con l'elenco ufficiale dei certificatori del {when} (non è stato possibile aggiornarlo)."
+    return prefix + f"Verifica fatta con l'elenco ufficiale dei certificatori (AgID) aggiornato al {when}."

@@ -42,5 +42,17 @@ class NetworkError(FirmaError):
     """The Aruba service could not be reached."""
 
 
+class TimestampError(FirmaError):
+    """The time-stamping service refused or failed (credentials, exhausted marks, service down).
+
+    Deliberately not a CredentialsError: a wrong TSA password must never count towards the
+    signing account's lockout counter.
+    """
+
+
 class FileError(FirmaError):
     """A local file can't be read, parsed or written."""
+
+
+class OriginalRequired(FileError):
+    """A detached timestamp (.tsr) can only be checked together with the file it was made for."""
