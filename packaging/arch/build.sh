@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Builds the Arch package (one file: dist/arch/aruba-firma-<version>-<rel>-any.pkg.tar.zst) and
-# installs it. makepkg downloads the five bundled Python libraries from PyPI (checksums pinned in
-# the PKGBUILD) and pacman installs the official dependencies; sudo is used only for pacman.
+# installs it. makepkg downloads the tagged source from GitHub and the five bundled Python
+# libraries from PyPI (all checksums pinned in the PKGBUILD); sudo is used only for pacman.
 #
+#   packaging/arch/release.sh             once per version: tags HEAD and pushes it to GitHub
 #   packaging/arch/build.sh               build, run the tests, install (asks for sudo)
 #   packaging/arch/build.sh --no-install  only check that the package builds (no tests, no
 #                                         dependency checks; nothing is installed)
 #
-# The tarball comes from `git archive HEAD`: commit before building.
+# This is also exactly what AUR's own build (and anyone running makepkg on the PKGBUILD) does:
+# fetch the pushed tag over the network. There is no local/offline shortcut, by design — it is
+# the actual thing being verified.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -24,8 +27,12 @@ fi
 
 version=$(python3 -c "import tomllib; print(tomllib.load(open('$root/pyproject.toml', 'rb'))['project']['version'])")
 sed -i "s/^pkgver=.*/pkgver=$version/" "$here/aruba-firma/PKGBUILD"
-git -C "$root" archive --format=tar.gz --prefix="aruba-firma-$version/" \
-  -o "$here/aruba-firma/aruba-firma-$version.tar.gz" HEAD
+
+tag="v$version"
+if ! git -C "$root" ls-remote --exit-code --tags origin "$tag" >/dev/null 2>&1; then
+  echo "Tag $tag isn't on GitHub yet. Run packaging/arch/release.sh first." >&2
+  exit 1
+fi
 
 (cd "$here/aruba-firma" && makepkg "${flags[@]}")
 pkg=$(ls -t "$here/aruba-firma"/*.pkg.tar.zst | head -1)
