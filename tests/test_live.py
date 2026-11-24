@@ -64,8 +64,8 @@ def test_one_session_signs_timestamps_and_verifies_everything(real_wallet, tmp_p
     password = profiles.password(store, profile)
     api = ArssClient()
     account, signer = service.prepare_account(api, profile.user, profile.domain, password, config.load(REAL_CONFIG))
-    tsa = profiles.tsa_credentials(store, profile, profile.user, password)
-    _say("TSA account", "saved separately" if profiles.tsa_account(store, profile) else "the signing credentials (A1)")
+    tsa = profiles.tsa_credentials(store, profile)  # None for Firma Remota: Aruba applies its own marks
+    _say("TSA account", "saved separately" if tsa else "none: relying on Aruba's automatic mark (requiredmark only)")
     out = Path(os.environ.get("FIRMA_LIVE_DIR") or tmp_path / "firmati")
     out.mkdir(parents=True, exist_ok=True)
 
@@ -112,17 +112,27 @@ def test_one_session_signs_timestamps_and_verifies_everything(real_wallet, tmp_p
                                                  f"sig_ts={report.checks[0].timestamp is not None}")
             else:
                 _say(f"LT {result.job.src.name} FAILED", f"{type(result.error).__name__}: {result.error.message}")
-        wrapped = service.sign_batch(api, account, password, None, service.fingerprint(tsd_jobs), out_dir=out,
-                                     signer_name=signer.name, tsa=tsa, level=TimestampType.TSD, session_id=session)
-        _say("TSD wrap", "ok" if wrapped[0].ok else f"{type(wrapped[0].error).__name__}: {wrapped[0].error.message}")
-        if wrapped[0].ok:
-            report = verify.verify_file(wrapped[0].output, trust)
-            _say("TSD wrap verify", f"kind={report.kind} verdict={report.verdict} timestamps={len(report.timestamps)}")
-            assert report.kind is Kind.TSD and report.content == note.read_bytes()
+        if tsa is not None:
+            wrapped = service.sign_batch(api, account, password, None, service.fingerprint(tsd_jobs), out_dir=out,
+                                         signer_name=signer.name, tsa=tsa, level=TimestampType.TSD, session_id=session)
+            _say("TSD wrap", "ok" if wrapped[0].ok else f"{type(wrapped[0].error).__name__}: {wrapped[0].error.message}")
+            if wrapped[0].ok:
+                report = verify.verify_file(wrapped[0].output, trust)
+                _say("TSD wrap verify", f"kind={report.kind} verdict={report.verdict} timestamps={len(report.timestamps)}")
+                assert report.kind is Kind.TSD and report.content == note.read_bytes()
     finally:
         api.close_session(AuthCtx(account, password), session)
 
-    if TIMESTAMPS:  # standalone marks: A8 A9 (no OTP)
+    if TIMESTAMPS and tsa is None and os.environ.get("FIRMA_LIVE_PROBE_TSA") == "1":
+        # A1 the other way round: are the Firma Remota credentials by any chance a TSA account too?
+        # Costs nothing if refused, one mark if accepted.
+        from firmaremota.models import TsaCredentials
+
+        probe = service.timestamp_batch(api, TsaCredentials(profile.user, password),
+                                        service.fingerprint([SignJob(note, Kind.TSD)]), out_dir=out)
+        _say("A1 probe: signing credentials as TSA account",
+             "ACCEPTED" if probe[0].ok else f"refused: {type(probe[0].error).__name__}: {probe[0].error.message}")
+    if TIMESTAMPS and tsa is not None:  # standalone marks: A8 A9 (no OTP)
         standalone = service.timestamp_batch(api, tsa, service.fingerprint(
             [SignJob(note, Kind.TSD), SignJob(note, Kind.TSR)]), out_dir=out)
         for result in standalone:
@@ -132,4 +142,5 @@ def test_one_session_signs_timestamps_and_verifies_everything(real_wallet, tmp_p
         assert tsd_report.kind is Kind.TSD and tsd_report.ok and tst.parse_tsd(standalone[0].output.read_bytes()).content == note.read_bytes()
         tsr_report = verify.verify_file(standalone[1].output, trust, original=note)
         assert tsr_report.kind is Kind.TSR and tsr_report.ok
+    if TIMESTAMPS:
         assert p7m.unwrap(marked[1].output.read_bytes()).content == note.read_bytes()

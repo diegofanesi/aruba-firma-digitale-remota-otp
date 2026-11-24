@@ -90,12 +90,12 @@ def test_tsa_server_address_is_passed_through():
     assert transport.field(0, "tsa_identity/tsaurl") == "https://tsa.example/ts"
 
 
-def test_tsd_level_or_no_tsa_means_no_mark():
+def test_tsd_level_means_no_mark_and_no_tsa_account_means_arubas_own_mark():
     api, transport = client({"pkcs7signV2": sign_ok("pkcs7signV2", b"\x30\x80p7m")})
     api.sign_cades(AuthCtx(ACCOUNT, PASSWORD, session_id=SESSION_ID, tsa=TSA, level=TimestampType.TSD), b"dati")
-    api.sign_cades(AuthCtx(ACCOUNT, PASSWORD, session_id=SESSION_ID, level=TimestampType.T), b"dati")  # no account
-    for index in (0, 1):
-        assert transport.field(index, "requiredmark") == "false" and transport.field(index, "tsa_identity") is None
+    assert transport.field(0, "requiredmark") == "false" and transport.field(0, "tsa_identity") is None
+    api.sign_cades(AuthCtx(ACCOUNT, PASSWORD, session_id=SESSION_ID, level=TimestampType.T), b"dati")  # Firma Remota
+    assert transport.field(1, "requiredmark") == "true" and transport.field(1, "tsa_identity") is None
 
 
 @pytest.mark.parametrize(("fmt", "operation"), [(Kind.TSD, "tsd"), (Kind.TSR, "tsr")])

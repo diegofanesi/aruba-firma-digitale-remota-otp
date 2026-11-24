@@ -170,11 +170,16 @@ def tsa_account(store: Store, profile: Profile) -> TsaCredentials | None:
     return tsa
 
 
-def tsa_credentials(store: Store | None, profile: Profile | None, user: str, password: str) -> TsaCredentials:
-    """What to send as the TSA account: the one saved for the profile, else the signing credentials
-    (Aruba's Firma Remota includes timestamps; the live test confirms the same credentials work)."""
-    saved = tsa_account(store, profile) if store is not None and profile is not None else None
-    return saved or TsaCredentials(user, password)
+def tsa_credentials(store: Store | None, profile: Profile | None) -> TsaCredentials | None:
+    """The TSA account saved for the profile, or None.
+
+    None is the normal case for Aruba's Firma Remota: its included timestamps are applied by Aruba's
+    server itself ("Marca Automatica" in the SelfCare, format LT), with no TSA credentials at all; a
+    TSA account is a separate product (a pack of marks), needed only for standalone .tsd/.tsr marks.
+    """
+    if store is None or profile is None:
+        return None
+    return tsa_account(store, profile)
 
 
 def set_tsa(store: Store, profile: Profile, tsa: TsaCredentials) -> None:

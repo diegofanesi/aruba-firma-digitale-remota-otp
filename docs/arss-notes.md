@@ -117,9 +117,9 @@ How this client maps it onto ARSS, and what `FIRMA_LIVE=1 uv run pytest -m live 
 
 | # | Assumption | Live check | Result |
 |---|---|---|---|
-| A0 | A plain signature (`requiredmark=false`) may already carry a TST (SelfCare automatic timestamp) | `has_timestamp` on the un-marked output, recorded | TBD |
-| A1 | The signing `user` + password are accepted as `tsaAuth` (Firma Remota: "marca inclusa") | T signatures succeed, no `TimestampError` | TBD |
-| A2 | `PADESBES` + `requiredmark=true` + `tsa_identity` → signature timestamp inside the PDF (level T) | `has_timestamp(PADES)`; `checks[0].timestamp` present | TBD |
+| A0 | A plain signature (`requiredmark=false`) may already carry a TST (SelfCare "Marca Automatica") | `has_timestamp` on the un-marked output, recorded | TBD |
+| A1 | ~~The signing credentials are accepted as `tsaAuth`~~ → **No** (offline check 2026-11-24, see below): Firma Remota's included marks are applied by Aruba's server; a TSA account is a separate product. The client now sends `requiredmark=true` **without** `tsa_identity` unless a TSA account is saved | T signatures without `tsa_identity` succeed | TBD |
+| A2 | `PADESBES` + `requiredmark=true` (no `tsa_identity`) → signature timestamp inside the PDF (level T) | `has_timestamp(PADES)`; `checks[0].timestamp` present | TBD |
 | A3 | `pkcs7signV2` + `requiredmark=true` → CAdES-T (unsigned `signature_time_stamp_token`) | same on the `.p7m` | TBD |
 | A4 | `PADESLTV` + mark → LT (TST plus revocation data / DocTimeStamp), still verifiable | `verify_file(...).ok`; shape and marks spent recorded | TBD |
 | A5 | `signatureLevel="LT"` accepted on `pkcs7signV2` | LT `.p7m` succeeds; else `ServiceError` → hide LT for `.p7m` | TBD |
@@ -129,9 +129,41 @@ How this client maps it onto ARSS, and what `FIRMA_LIVE=1 uv run pytest -m live 
 | A9 | `tsr` returns a DER `TimeStampResp` (granted) over the file | `verify_file(out, original=...)` valid | TBD |
 | A10 | TSA error vocabulary: ArubaSign's 0049 / 0073–0085 / 93001 / 93003 and words like "TSA", "marca" | not provoked (marks, lockout); unit-tested mapping only | unconfirmed |
 
-Decisions after the live run: A1 fails → default becomes ArubaSign's (no timestamp until a TSA account is
-saved with `configura --credenziali-marca`); A2 fails → try `PADESLTV` for T too; A5 fails → remove LT for
-`.p7m`. ArubaSign's TSA error texts: 0049 "Credenziali errate...", 0074 "Hai esaurito le tue marche
+Decisions after the live run: A2 fails (no TST with `requiredmark` alone) → the account probably has no
+"Marca Automatica": tell the user to enable it in the SelfCare, or fall back to ArubaSign's behaviour (no
+timestamp until a TSA account is saved); A4/A5 fail → remove LT for `.p7m` / keep `PADESBES` only.
+
+**Offline validation round (2026-11-24, before any live test).** Sources: Aruba's guides
+(guide.aruba.it: "Firma Remota › Aruba Sign › configura e applica la marca temporale"; "App Firma Digitale
+Aruba › configurare un account di marca temporale"; "Marca temporale › configurare l'account"), Aruba's
+"Manuale d'uso Marca Temporale con Aruba Sign" (pec.it), the UNIGE "Vademecum strumenti Aruba", the public
+ARSS example `gist.github.com/marcodebe/6138525`, and the ArubaSign 2 package's readable front-end sources
+(`aruba-components-lib.mjs.map` embeds the TypeScript; the Java back-end is encrypted and was not touched).
+- **Included marks are server-side.** "Se hai acquistato la Firma Digitale Remota con marca temporale
+  incorporata, l'apposizione della marca temporale dipende dalla configurazione scelta nel pannello selfcare
+  della Firma Remota. […] Il formato utilizzato è LT e non può essere modificato." The app guide: "In caso di
+  Firma Digitale Remota con marcatura temporale illimitata, il formato della marca è impostato su LT e non
+  può essere modificato", and to check in the SelfCare that "Marca Automatica" is enabled. ArubaSign's
+  front-end mirrors this: `DeviceInfo.automaticTimeStamp` → "Il documento è stato firmato e marcato
+  temporalmente" + "L'applicazione automatica della Marca Temporale è facoltativa e puoi gestirla dal
+  SelfCare". Nothing in ArubaSign ever copies the signing credentials into the TSA settings.
+- **TSA credentials are a separate account.** Every guide: "inserisci le credenziali del tuo account di Marca
+  Temporale"; UNIGE: "in ARUBA i due servizi vengono configurati separatamente", TSA user/password
+  "comunicati separatamente"; remaining marks only at `https://servizi.arubapec.it/tsa/marcheresidue.php`
+  (HTTP basic auth with the TSA account). Default TSA URL for a purchased pack:
+  `https://servizi.arubapec.it/tsa/ngrequest.php`; "Policy" left empty.
+- **`requiredmark` alone is how ARSS is called in the wild.** The public example signs with
+  `requiredmark=True` and no `tsa_identity` for a business (`frAzienda`) account.
+- ArubaSign vocabulary: `SignatureLevel {BES, T, LT}` for every format (supports `signatureLevel="LT"` on
+  `signRequestV2`); `TimestampType {T, LT, TSD, TSR}`; TSD = the finished `.p7m` wrapped as is; `.tsr`
+  detached, verified next to its original. Error texts 0073–0085, 0049, 0081/0082, 93001–93003 as listed above.
+- Consequences applied to the code: no silent fallback to the signing credentials; standalone `marca` and the
+  `.p7m.tsd` wrap require a saved TSA account (as ArubaSign does), with an explanatory error before any OTP;
+  signatures with a timestamp send `requiredmark=true` and, only when a TSA account is saved, `tsa_identity`.
+- **Still only the live test can tell:** whether this account's "Marca Automatica" is on (A0), whether
+  `requiredmark=true` forces the mark when it is off (A2/A3), what LT looks like (A4/A5), the TSU chain (A7).
+  Zero-cost pre-checks for the user: look at the SelfCare for "Marca Automatica"; try the Firma Remota
+  credentials at `marcheresidue.php` (if accepted, they are also a TSA account and A1 was wrong the other way). ArubaSign's TSA error texts: 0049 "Credenziali errate...", 0074 "Hai esaurito le tue marche
 temporali", 0073/0078/0080 service unreachable, 0079 too many requests, 0081/0082 account disabled/expired,
 0085 automatic timestamp failed, 93001 "Indirizzo server Timestamp non specificato", 93003 "credenziali TSA
 errate".

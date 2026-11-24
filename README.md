@@ -86,10 +86,11 @@ aruba-firma diagnostica [--credenziali]    # controlli utili per l'assistenza
 aruba-firma <comando> --help
 ```
 
-La marca temporale è inclusa nella Firma Remota Aruba (nelle altre firme Aruba si compra a pacchetti):
-se Aruba la rifiuta, il file non viene salvato e il messaggio spiega cosa fare (riprovare senza marca,
-attivare la marca automatica nel SelfCare, oppure salvare le credenziali TSA con `configura
---credenziali-marca`).
+Nella Firma Remota Aruba la marca temporale sulle firme è inclusa e la applica il server di Aruba
+(nel SelfCare, https://selfcare.firma-remota.it, deve essere attiva la «Marca Automatica»; il formato
+è LT): l'app la richiede con `requiredmark` e, se non arriva, non salva il file e spiega cosa fare. Per
+marcare un file **senza** firmarlo (`marca`, `.tsd`/`.tsr`) e per la busta `.p7m.tsd` serve invece un
+account di marca temporale comprato a parte (`configura --credenziali-marca`), come in Aruba Sign.
 
 Il dominio di firma è `firma` per le firme comprate su pec.it (il selfcare mostra
 `utente@firma`); le firme rilasciate da un'organizzazione hanno il loro dominio (`frNomeEnte`).

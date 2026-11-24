@@ -502,8 +502,7 @@ def test_sign_pdf_with_timestamp_passes_tsa_and_level(window, api, qtbot, tmp_pa
     window.options.sign.click()
     wait_for(qtbot, window, window.result)
     assert window.result.title.text() == "Fatto! Documento firmato e marcato temporalmente."
-    (tsa, level) = api.tsa_seen[0]
-    assert tsa.user == "mario.rossi" and tsa.password == PASSWORD and level is TimestampType.LT
+    assert api.tsa_seen[0] == (None, TimestampType.LT)  # no TSA account: Aruba's own mark, requested with requiredmark
     assert verify.has_timestamp(Kind.PADES, (tmp_path / "a_firmato.pdf").read_bytes())
 
 
@@ -524,12 +523,18 @@ def test_options_timestamp_preset_from_profile(window, api, qtbot, store, tmp_pa
     assert api.tsa_seen == [(None, None)] and window.result.title.text() == "Fatto! Documento firmato."
 
 
-def test_p7m_tsd_level_wraps(window, api, qtbot, tmp_path):
+def test_p7m_tsd_level_wraps(window, api, qtbot, store, tmp_path):
+    from firmaremota import profiles
+    from firmaremota.models import TsaCredentials
+
     (tmp_path / "fattura.xml").write_bytes(b"<f/>")
     window.choose_files = Recorder([str(tmp_path / "fattura.xml")])
     window.home.sign_other.click()
     assert [window.options.level.itemData(i) for i in range(window.options.level.count())] == ["T", "LT", "TSD"]
     window.options.level.setCurrentIndex(2)
+    window.options.sign.click()  # no TSA account: refused before the OTP, with the explanation
+    assert "account di marca temporale" in window.show_error.calls[-1][1] and window.ask_otp.calls == []
+    profiles.set_tsa(store, profiles.load_all(store)[0], TsaCredentials("tsa", "pw"))
     window.options.sign.click()
     wait_for(qtbot, window, window.result)
     assert (tmp_path / "fattura.xml.p7m.tsd").exists() and api.names().count("timestamp_file") == 1
@@ -537,13 +542,17 @@ def test_p7m_tsd_level_wraps(window, api, qtbot, tmp_path):
     assert window.open_url.calls[-1] == (tmp_path / "fattura.xml.p7m.tsd",)
 
 
-def test_timestamp_button_makes_tsd_without_otp(window, api, qtbot, tmp_path):
-    from firmaremota import verify
+def test_timestamp_button_makes_tsd_without_otp(window, api, qtbot, store, tmp_path):
+    from firmaremota import profiles, verify
+    from firmaremota.models import TsaCredentials
 
     (tmp_path / "nota.txt").write_bytes(b"ciao")
     (tmp_path / "foto.jpg").write_bytes(b"finta")
     window.choose_files = Recorder([str(tmp_path / "nota.txt"), str(tmp_path / "foto.jpg")])
     window.ask_timestamp_format = Recorder("tsd")
+    window.home.timestamp_file.click()  # Firma Remota alone: explained, nothing sent
+    assert "account di marca temporale" in window.show_error.calls[-1][1] and api.calls == []
+    profiles.set_tsa(store, profiles.load_all(store)[0], TsaCredentials("tsa", "pw"))
     window.home.timestamp_file.click()
     wait_for(qtbot, window, window.result)
     assert window.ask_timestamp_format.calls == [(2,)] and window.ask_otp.calls == []
@@ -553,7 +562,11 @@ def test_timestamp_button_makes_tsd_without_otp(window, api, qtbot, tmp_path):
     assert window.result.retry.text() == "Marca i rimanenti" and not window.result.retry.isVisibleTo(window)
 
 
-def test_timestamp_button_tsr_shows_the_note_and_cancel(window, api, qtbot, tmp_path):
+def test_timestamp_button_tsr_shows_the_note_and_cancel(window, api, qtbot, store, tmp_path):
+    from firmaremota import profiles
+    from firmaremota.models import TsaCredentials
+
+    profiles.set_tsa(store, profiles.load_all(store)[0], TsaCredentials("tsa", "pw"))
     (tmp_path / "nota.txt").write_bytes(b"ciao")
     window.choose_files = Recorder([str(tmp_path / "nota.txt")])
     window.ask_timestamp_format = Recorder(None)  # cancelled

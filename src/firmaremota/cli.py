@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from . import __version__, config, credentials, diagnostics, files, logsetup, messages, p7m, profiles, service, tst, verify
-from .errors import CredentialsError, FirmaError, OtpError
+from .errors import CredentialsError, FirmaError, OtpError, TimestampError
 from .models import LAST_PAGE, Kind, Position, SignerInfo, SignJob, StampSpec, TimestampType, TsaCredentials
 
 log = logging.getLogger("firmaremota.cli")
@@ -168,7 +168,10 @@ def _sign(args: argparse.Namespace, kind: Kind) -> int:
     jobs = service.fingerprint(jobs)  # a file that changes from now on is refused at signing time
     user, domain, password, profile, store = _credentials(args, settings)
     level = TimestampType(args.tipo_marca) if _timestamp_wanted(args, profile) else None
-    tsa = profiles.tsa_credentials(store, profile, user, password) if level else None
+    tsa = profiles.tsa_credentials(store, profile) if level else None
+    problem = service.needs_tsa_account(level, tsa)
+    if problem:
+        raise TimestampError(problem)
     api = make_api()
     _confirm_after_failures()
     account, signer = service.prepare_account(api, user, domain, password, settings)
@@ -224,7 +227,9 @@ def cmd_marca(args: argparse.Namespace) -> int:
         return EXIT_ERROR
     jobs = service.fingerprint(jobs)
     user, domain, password, profile, store = _credentials(args, settings)
-    tsa = profiles.tsa_credentials(store, profile, user, password)
+    tsa = profiles.tsa_credentials(store, profile)
+    if tsa is None:
+        raise TimestampError(service.NO_TSA_ACCOUNT)
     _remember_profile(settings, profile)
     if fmt is Kind.TSR:
         print(TSR_NOTE)
@@ -294,7 +299,7 @@ def _needs_profile(args: argparse.Namespace) -> bool:
 def _timestamp_label(store, profile: profiles.Profile) -> str:
     if not profile.timestamp:
         return "marca temporale: no"
-    return "marca temporale: sì (" + ("account TSA" if store.get(profile.tsa_key) else "credenziali di firma") + ")"
+    return "marca temporale: sì (" + ("account TSA" if store.get(profile.tsa_key) else "marca automatica di Aruba") + ")"
 
 
 def cmd_configura(args: argparse.Namespace) -> int:
@@ -337,7 +342,7 @@ def cmd_configura(args: argparse.Namespace) -> int:
                   + (" (le firme avranno una marca temporale)." if wanted else " (firme senza marca)."))
         else:
             profiles.forget_tsa(store, profile)
-            print(f"Credenziali TSA di «{profile.alias}» rimosse: per le marche si useranno quelle di firma.")
+            print(f"Credenziali TSA di «{profile.alias}» rimosse.")
         return EXIT_OK
 
     if not sys.stdin.isatty():
@@ -555,9 +560,9 @@ def build_parser() -> argparse.ArgumentParser:
     only.add_argument("--marca", choices=["si", "no"], help="mettere la marca temporale su tutto ciò che si firma? "
                                                               "(predefinito: si)")
     only.add_argument("--credenziali-marca", action="store_true",
-                      help="salva un account TSA separato per le marche temporali (altrimenti si usano le "
-                           "credenziali di firma)")
-    only.add_argument("--dimentica-credenziali-marca", action="store_true", help="torna a usare le credenziali di firma")
+                      help="salva l'account di marca temporale (TSA) comprato a parte: serve per marcare file senza "
+                           "firmarli e per la busta .tsd (le firme usano la marca automatica di Aruba)")
+    only.add_argument("--dimentica-credenziali-marca", action="store_true", help="rimuove l'account TSA salvato")
     configura.set_defaults(handler=cmd_configura)
 
     diagnostica = commands.add_parser(

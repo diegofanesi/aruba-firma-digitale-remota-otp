@@ -317,7 +317,7 @@ def test_timestamp_on_by_default_and_flags(api, configured, tmp_path, make_pdf, 
     (tmp_path / "a.pdf").write_bytes(make_pdf(A4))
     answers(monkeypatch, "12345678")
     assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 0
-    assert api.tsa_seen == [(TsaCredentials("mario.rossi", PASSWORD), TimestampType.T)]  # the signing credentials
+    assert api.tsa_seen == [(None, TimestampType.T)]  # no TSA account: Aruba's own (included) mark
     assert verify.has_timestamp(Kind.PADES, (tmp_path / "a_firmato.pdf").read_bytes())
     assert "— con marca temporale" in capsys.readouterr().out
     answers(monkeypatch, "12345678")
@@ -341,8 +341,14 @@ def test_profile_setting_off_and_marca_flag_on(api, configured, tmp_path, make_p
     assert cli.main(["pdf", "--marca", str(tmp_path / "a.pdf")]) == 0 and api.tsa_seen[-1][1] == TimestampType.T
 
 
-def test_p7m_tsd_level_wraps(api, tmp_path, monkeypatch):
+def test_p7m_tsd_level_wraps(api, configured, tmp_path, monkeypatch, capsys):
+    from firmaremota import profiles
+    from firmaremota.models import TsaCredentials
+
     (tmp_path / "fattura.xml").write_bytes(b"<f/>")
+    assert cli.main(["p7m", "--tipo-marca", "TSD", str(tmp_path / "fattura.xml")]) == 1  # no TSA account yet
+    assert "account di marca temporale" in capsys.readouterr().err and api.calls == []
+    profiles.set_tsa(configured, profiles.load_all(configured)[0], TsaCredentials("tsa", "pw"))
     answers(monkeypatch, "12345678")
     assert cli.main(["p7m", "--tipo-marca", "TSD", str(tmp_path / "fattura.xml")]) == 0
     assert (tmp_path / "fattura.xml.p7m.tsd").exists() and api.names().count("timestamp_file") == 1
@@ -354,11 +360,15 @@ def test_tsd_level_is_not_offered_for_pdf(capsys):
     assert exc.value.code == 2
 
 
-def test_marca_command_tsd_and_tsr(api, tmp_path, monkeypatch, capsys):
-    from firmaremota import verify
+def test_marca_command_tsd_and_tsr(api, configured, tmp_path, monkeypatch, capsys):
+    from firmaremota import profiles, verify
+    from firmaremota.models import TsaCredentials
 
     (tmp_path / "nota.txt").write_bytes(b"ciao")
     (tmp_path / "foto.jpg").write_bytes(b"\xff\xd8 finta")
+    assert cli.main(["marca", str(tmp_path / "nota.txt")]) == 1  # Firma Remota alone can't mark files
+    assert "configura --credenziali-marca" in capsys.readouterr().err and api.calls == []
+    profiles.set_tsa(configured, profiles.load_all(configured)[0], TsaCredentials("tsa", "pw"))
     assert cli.main(["marca", str(tmp_path / "nota.txt"), str(tmp_path / "foto.jpg")]) == 0
     out = capsys.readouterr().out
     assert out.count("Marcato:") == 2 and "OTP" not in out
@@ -369,9 +379,12 @@ def test_marca_command_tsd_and_tsr(api, tmp_path, monkeypatch, capsys):
     assert "Formato TSR" in out and "documento originale" in out and (tmp_path / "nota.txt.tsr").exists()
 
 
-def test_marca_with_tsa_error(api, tmp_path, monkeypatch, capsys):
+def test_marca_with_tsa_error(api, configured, tmp_path, monkeypatch, capsys):
+    from firmaremota import profiles
     from firmaremota.errors import TimestampError
+    from firmaremota.models import TsaCredentials
 
+    profiles.set_tsa(configured, profiles.load_all(configured)[0], TsaCredentials("tsa", "pw"))
     api.timestamp_error = TimestampError("Le marche temporali del tuo account sono finite")
     (tmp_path / "nota.txt").write_bytes(b"ciao")
     assert cli.main(["marca", str(tmp_path / "nota.txt")]) == 1

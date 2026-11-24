@@ -130,11 +130,13 @@ class ArssClient:
 
     def _sign_request(self, auth: AuthCtx, data: bytes, *, cades: bool):
         """The common part of every signing call. A timestamp (`auth.level` T or LT) is requested with
-        `requiredmark` + the TSA account; LT on a .p7m also asks for the matching `signatureLevel`
-        (PDFs get it through `pdfprofile`). Both mappings are assumptions to confirm live."""
+        `requiredmark=true`; `tsa_identity` goes along only when the user has a TSA account of their own
+        (Firma Remota's included marks are applied by Aruba's server with no TSA credentials: this is
+        how Aruba's public example calls `pdfsignatureV2`). LT on a .p7m also asks for the matching
+        `signatureLevel` (PDFs get it through `pdfprofile`). The mappings are confirmed by the live test."""
         register_secret(auth.session_id)
         otp = None if auth.session_id else auth.otp
-        marked = auth.tsa is not None and auth.level in (TimestampType.T, TimestampType.LT)
+        marked = auth.level in (TimestampType.T, TimestampType.LT)
         return self._type("signRequestV2")(
             certID=auth.account.cert_id,
             identity=self._identity(auth.account, auth.password, otp),
@@ -142,7 +144,7 @@ class ArssClient:
             transport="BYNARYNET",
             binaryinput=data,
             session_id=auth.session_id,
-            tsa_identity=self._tsa_identity(auth.tsa) if marked else None,
+            tsa_identity=self._tsa_identity(auth.tsa) if marked and auth.tsa is not None else None,
             signatureLevel="LT" if marked and cades and auth.level is TimestampType.LT else None,
         )
 
@@ -194,9 +196,9 @@ class ArssClient:
                 page=stamp.page, leftx=stamp.llx, lefty=stamp.lly, rightx=stamp.urx, righty=stamp.ury,
                 testo=text, bShowDateTime=show_date, imageBin=image,
             )
-        marked = auth.tsa is not None and auth.level is TimestampType.LT
         response = self._call("pdfsignatureV2", SignRequestV2=self._sign_request(auth, pdf, cades=False),
-                              Apparence=appearance, pdfprofile="PADESLTV" if marked else "PADESBES")
+                              Apparence=appearance,
+                              pdfprofile="PADESLTV" if auth.level is TimestampType.LT else "PADESBES")
         return self._output(response)
 
     def sign_cades(self, auth: AuthCtx, data: bytes) -> bytes:

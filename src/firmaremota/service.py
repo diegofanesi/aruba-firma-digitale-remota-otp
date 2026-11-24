@@ -27,6 +27,12 @@ NO_TIMESTAMP = (
     "oppure controlla le credenziali TSA dell'account (o attiva la marca automatica nel SelfCare di Aruba: "
     "https://selfcare.firma-remota.it)."
 )
+NO_TSA_ACCOUNT = (
+    "Per questa operazione serve un account di marca temporale Aruba (le marche si comprano a pacchetti; "
+    "quelle incluse nella Firma Remota valgono solo per le firme, applicate da Aruba con la «Marca Automatica» "
+    "del SelfCare). Salva l'account con: aruba-firma configura --credenziali-marca "
+    "(nell'interfaccia grafica: Impostazioni → account → Marca temporale)."
+)
 MISMATCH = ("Il documento firmato ricevuto per {name} non corrisponde a quello inviato: non salvato. "
             "Riprova; se succede ancora, contatta l'assistenza.")
 BROKEN = ("La firma ricevuta per {name} non supera il controllo di integrità: non salvato. "
@@ -129,6 +135,11 @@ def returned_matches(kind: Kind, original: bytes, signed: bytes) -> bool:
         return p7m.unwrap(signed, max_depth=1).content == original
     except FirmaError:
         return False
+
+
+def needs_tsa_account(level: TimestampType | None, tsa: TsaCredentials | None) -> str | None:
+    """Why the requested timestamp can't be done without a TSA account, or None. Checked before any OTP."""
+    return NO_TSA_ACCOUNT if level is TimestampType.TSD and tsa is None else None
 
 
 def auth_failures() -> int:
@@ -244,6 +255,9 @@ def sign_batch(
     """
     if not jobs:
         return []  # never spend an OTP on nothing
+    problem = needs_tsa_account(level, tsa)
+    if problem:
+        raise TimestampError(problem)
     register_secret(password, otp)
     if tsa is not None:
         register_secret(tsa.password)
@@ -256,9 +270,8 @@ def sign_batch(
             _record_auth(False)
             raise
         _record_auth(True)
-    wrap = tsa if tsa is not None and level is TimestampType.TSD else None
-    auth = AuthCtx(account, password, session_id=session_id, tsa=tsa if tsa is not None and not wrap else None,
-                   level=None if wrap or tsa is None else level)
+    wrap = tsa if level is TimestampType.TSD else None
+    auth = AuthCtx(account, password, session_id=session_id, tsa=None if wrap else tsa, level=None if wrap else level)
     results: list[JobResult] = []
     try:
         for index, job in enumerate(jobs):

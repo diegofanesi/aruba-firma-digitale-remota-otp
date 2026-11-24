@@ -57,7 +57,7 @@ class FakeArss:
 
     def _tsa(self, auth):
         self.tsa_seen.append((auth.tsa, auth.level))
-        marked = auth.tsa is not None and auth.level in (TimestampType.T, TimestampType.LT)
+        marked = auth.level in (TimestampType.T, TimestampType.LT)
         if marked and self.timestamp_error:
             raise self.timestamp_error
         return marked

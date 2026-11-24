@@ -703,6 +703,10 @@ class MainWindow(QMainWindow):
         if found is None:
             return
         user, domain, password, remember, profile = found
+        problem = service.needs_tsa_account(level, profiles.tsa_credentials(self.store, profile))
+        if problem:
+            self.show_error("Serve un account di marca temporale", problem + "\n\nNon è stato usato nessun codice OTP.")
+            return
         settings = config.load()
         self.mode, self.last_level = "sign", level
         self.pending = {"jobs": jobs, "password": password, "remember": remember, "profile": profile,
@@ -730,7 +734,7 @@ class MainWindow(QMainWindow):
             return
         self.cancel_event = threading.Event()
         level = pending["level"]
-        tsa = profiles.tsa_credentials(self.store, pending["profile"], pending["user"], pending["password"]) if level else None
+        tsa = profiles.tsa_credentials(self.store, pending["profile"]) if level else None
         self.progress.start("Firma in corso..." + (" con marca temporale" if level else ""), total=len(jobs),
                             cancellable=len(jobs) > 1)
         job = worker.Worker(service.sign_batch, self.api, account, pending["password"], otp, jobs,
@@ -745,27 +749,33 @@ class MainWindow(QMainWindow):
 
     # --- standalone timestamps --------------------------------------------------------------------
 
+    def tsa_for_marks(self):
+        """The TSA account of the current profile, or None after explaining why standalone marks need one."""
+        tsa = profiles.tsa_credentials(self.store, self.current) if self.store and self.current else None
+        if tsa is None:
+            self.show_error("Serve un account di marca temporale", service.NO_TSA_ACCOUNT)
+        return tsa
+
     def timestamp_files(self) -> None:
         paths = self.choose_files("Scegli i file a cui dare data certa", "Tutti i file (*)")
-        if not paths:
+        if not paths or self.tsa_for_marks() is None:
             return
         fmt = self.ask_timestamp_format(len(paths))
         if fmt:
             self.timestamp(paths, Kind.TSR if fmt == "tsr" else Kind.TSD)
 
     def timestamp(self, paths: list[str], kind: Kind) -> None:
-        """Local checks, the credentials (no check with Aruba: it would spend a mark), then the timestamps."""
+        """Local checks, the TSA account saved for the current profile (no check with Aruba: it would spend a
+        mark), then the timestamps. Firma Remota's included marks don't apply: they are only for signatures."""
         jobs = [SignJob(Path(p), kind) for p in paths]
         problems = service.preflight(jobs)
         if problems:
             self.show_error("Impossibile marcare", "\n".join(problems))
             return
         jobs = service.fingerprint(jobs)
-        found = self.credentials_for_signing()
-        if found is None:
+        tsa = self.tsa_for_marks()
+        if tsa is None:
             return
-        user, domain, password, _remember, profile = found
-        tsa = profiles.tsa_credentials(self.store, profile, user, password)
         self.mode, self.cancel_event = "timestamp", threading.Event()
         self.progress.start("Marca temporale in corso...", total=len(jobs), cancellable=len(jobs) > 1)
         self.stack.setCurrentWidget(self.progress)

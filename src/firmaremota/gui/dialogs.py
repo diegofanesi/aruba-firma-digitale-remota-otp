@@ -168,7 +168,8 @@ class ProfileEditDialog(QDialog):
         self.timestamp.setChecked(profile.timestamp if profile else True)
         box.addWidget(self.timestamp)
         saved_tsa = profiles.tsa_account(store, profile) if profile else None
-        self.tsa_separate = QCheckBox("Usa un account TSA separato (altrimenti le credenziali di firma)")
+        self.tsa_separate = QCheckBox("Ho un account di marca temporale (TSA) comprato a parte: serve per marcare "
+                                      "file senza firmarli")
         self.tsa_separate.setChecked(saved_tsa is not None)
         box.addWidget(self.tsa_separate)
         tsa_form = QFormLayout()

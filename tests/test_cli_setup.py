@@ -92,8 +92,8 @@ def test_elenco(env, capsys):
     add_profile(env.store, "Anna", "anna.bianchi@frStudio")
     assert cli.main(["configura", "--elenco"]) == 0
     out = capsys.readouterr().out
-    assert "Mario: mario.rossi@firma (password salvata; marca temporale: sì (credenziali di firma))" in out
-    assert "Anna: anna.bianchi@frStudio (password non salvata; marca temporale: sì (credenziali di firma))" in out
+    assert "Mario: mario.rossi@firma (password salvata; marca temporale: sì (marca automatica di Aruba))" in out
+    assert "Anna: anna.bianchi@frStudio (password non salvata; marca temporale: sì (marca automatica di Aruba))" in out
     env.store.data.clear()
     assert cli.main(["configura", "--elenco"]) == 0
     assert "Nessun account salvato" in capsys.readouterr().out
@@ -205,7 +205,7 @@ def test_configura_marca_options(env, capsys):
 
     profile = add_profile(env.store, "Mario", "mario.rossi@firma", PASSWORD)
     assert cli.main(["configura", "--elenco"]) == 0
-    assert "marca temporale: sì (credenziali di firma)" in capsys.readouterr().out
+    assert "marca temporale: sì (marca automatica di Aruba)" in capsys.readouterr().out
     assert cli.main(["configura", "--marca", "no"]) == 0
     assert profiles.load_all(env.store)[0].timestamp is False and "disattivata" in capsys.readouterr().out
     assert cli.main(["configura", "--elenco"]) == 0

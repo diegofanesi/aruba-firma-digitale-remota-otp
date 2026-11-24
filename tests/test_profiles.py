@@ -112,11 +112,10 @@ def test_tsa_account_fallback_and_saved():
     store = MemoryStore()
     p = profiles.upsert(store, [], profiles.new_profile("Mario", "mario.rossi", "firma"))[0]
     assert profiles.tsa_account(store, p) is None
-    assert profiles.tsa_credentials(store, p, "mario.rossi", "pw") == TsaCredentials("mario.rossi", "pw")
-    assert profiles.tsa_credentials(None, None, "typed", "pw") == TsaCredentials("typed", "pw")
+    assert profiles.tsa_credentials(store, p) is None and profiles.tsa_credentials(None, None) is None  # Aruba's own marks
     profiles.set_tsa(store, p, TsaCredentials("tsa-user", "tsa-pw", "https://tsa.example"))
     assert profiles.tsa_account(store, p) == TsaCredentials("tsa-user", "tsa-pw", "https://tsa.example")
-    assert profiles.tsa_credentials(store, p, "mario.rossi", "pw").user == "tsa-user"
+    assert profiles.tsa_credentials(store, p).user == "tsa-user"
     assert set(store.data) == {profiles.INDEX_KEY, p.tsa_key} and "mario" not in p.tsa_key
     profiles.forget_tsa(store, p)
     assert profiles.tsa_account(store, p) is None

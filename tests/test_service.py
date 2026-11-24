@@ -227,6 +227,19 @@ def test_no_timestamp_requested_means_none_asked(docs, api_t):
     assert not any(verify.has_timestamp(r.job.kind, r.output.read_bytes()) for r in results)
 
 
+def test_timestamp_without_tsa_account_relies_on_aruba(docs, api_t):
+    """Firma Remota: `requiredmark` alone, no TSA credentials; Aruba applies its own (included) mark."""
+    results = service.sign_batch(api_t, ACCOUNT, "pw", OTP, jobs(docs), level=TimestampType.T)
+    assert all(r.ok for r in results) and api_t.tsa_seen == [(None, TimestampType.T)] * 3
+
+
+def test_tsd_level_needs_a_tsa_account(docs, api_t):
+    with pytest.raises(TimestampError, match="account di marca temporale"):
+        service.sign_batch(api_t, ACCOUNT, "pw", OTP, [SignJob(docs / "c.xml", Kind.CADES)], level=TimestampType.TSD)
+    assert api_t.calls == []  # refused before any OTP is spent
+    assert service.needs_tsa_account(TimestampType.T, None) is None
+
+
 def test_missing_timestamp_is_refused_and_stops_batch(docs, make_p7m, sign_pdf):
     """Aruba answers with a plain signature although a timestamp was asked for: nothing is saved."""
     api = FakeArss(make_p7m=make_p7m, sign_pdf=lambda pdf, timestamp=False: sign_pdf(pdf))  # ignores the request
