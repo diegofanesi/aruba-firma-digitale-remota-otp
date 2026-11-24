@@ -1,3 +1,4 @@
+# Maintainer: diegofanesi <diego.fanesi@gmail.com>
 # aruba-firma: Aruba remote digital signature client (CLI + Qt GUI), one self-contained package.
 # Independent client for Aruba's public remote-signing API (ARSS/firma remota): not a repackage
 # of Aruba's own ArubaSign installer (see arubasign-bin / arubasign-rolling-bin on the AUR).
@@ -41,6 +42,20 @@ checkdepends=('python-pytest' 'python-pytest-qt')
 # in the official repositories. They are shipped inside this package, unpacked from the pinned
 # PyPI wheels into /usr/lib/aruba-firma/vendor, which the app adds to its import path only after
 # the system path: a copy installed system-wide always takes precedence (src/firmaremota/__init__.py).
+#
+# `namcap` on the built package reports findings from this; all checked and expected, not fixed:
+#  - ~635 "uninstalled dependency" warnings: cross-references among pyhanko/pyhanko_certvalidator/
+#    signxml/uritools/xsdata themselves. False positives: namcap can't see into /usr/lib/aruba-firma
+#    /vendor, which isn't a path owned by any pacman package.
+#  - 3 errors (python-dateutil, python-click, python-jinja "detected and not included"): genuinely
+#    unused by us, verified by reading the source, not just by absence of a crash:
+#      - dateutil: pyhanko/pdf_utils/misc.py imports it inside try/except ImportError, falling back
+#        to the stdlib datetime.fromisoformat; an explicitly optional dependency of pyhanko itself.
+#      - click, jinja2, toposort, PIL, fontTools, uharfbuzz, barcode, qrcode, python-pkcs11,
+#        PyInstaller (build hooks): xsdata's own CLI/code-generator tooling, and pyhanko's own
+#        optional extras for local PDF stamping, custom fonts, QR/barcode appearances and PKCS#11
+#        HSM signing. We only use pyhanko to *verify* signatures locally; Aruba's ARSS does the
+#        actual signing and the visible stamp server-side, so none of this is ever imported.
 _vendored=(
   uritools-7.0.1-py3-none-any.whl
   signxml-5.3.1-py3-none-any.whl
