@@ -170,3 +170,21 @@ ARSS example `gist.github.com/marcodebe/6138525`, and the ArubaSign 2 package's 
 temporali", 0073/0078/0080 service unreachable, 0079 too many requests, 0081/0082 account disabled/expired,
 0085 automatic timestamp failed, 93001 "Indirizzo server Timestamp non specificato", 93003 "credenziali TSA
 errate".
+
+## Free timestamps from the Belgian federal TSA (added 2026-11-25; not an ARSS feature)
+The user's kit has no timestamps (TSA realm refuses the signing credentials; no "Marca automatica" in
+SelfCare). As an alternative the app adds, **client-side and after ARSS has signed**, a qualified
+timestamp from `http://tsa.belgium.be/connect` (FPS BOSA; QTST on the Belgian trusted list; verified
+live 2026-11-25: intact, valid, trusted, revocation checked; HTTPS fails the TLS handshake):
+- ARSS is asked for a plain signature (`requiredmark=False`, no `tsa_identity`);
+- PDF: `PdfTimeStamper.timestamp_pdf` appends a `/DocTimeStamp` incremental update (fixed reserve of
+  16 KB, so no extra "dummy" request), PAdES B-T per ETSI EN 319 142-1; ARSS's bytes stay a prefix;
+- `.p7m`: a `signature-time-stamp` unsigned attribute (imprint = SHA-256 of the SignerInfo's signature
+  value) on each outer signer without one: CAdES-T;
+- every token is checked before saving (nonce, imprint, chain to a QTST on the EU lists), and the
+  stamped file must pass the same integrity checks as ARSS's output; up to 3 attempts per file, then
+  the plain signature is saved with a warning and the batch stops trying (`timestamping.py`).
+
+Not yet seen live on real ARSS output: whether ARSS's `.p7m` is DER or BER (asn1crypto re-encodes the
+SignerInfo when the attribute is added; the integrity check guards it) and the document timestamp on
+ARSS's PDFs. Both are covered by the live run with one OTP.

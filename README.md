@@ -8,9 +8,10 @@ resta sui server Aruba e ogni firma è autorizzata con nome utente, password e c
 - firma di PDF (PAdES, il file resta un PDF) e di qualsiasi file (busta CAdES `.p7m`);
 - più documenti con un solo codice OTP;
 - timbro visibile sul PDF (pagina e angolo a scelta);
-- **marca temporale** (data certa) sulle firme, come in Aruba Sign («Marca sempre i file firmati»,
-  da attivare per account; tipo T, LT o TSD, `.p7m.tsd`); marca temporale anche su un file da solo,
-  senza firmarlo (`.tsd` o `.tsr`, con un account di marca temporale);
+- **marca temporale** (data certa) sulle firme, scelta per account: quella di Aruba, come in Aruba Sign
+  (tipo T, LT o TSD, `.p7m.tsd`), oppure una **marca gratuita** e qualificata del servizio pubblico
+  belga (vedi sotto); marca temporale anche su un file da solo, senza firmarlo (`.tsd` o `.tsr`, con
+  un account di marca temporale Aruba);
 - verifica delle firme e delle marche temporali con l'elenco ufficiale dei certificatori (AgID /
   EU), anche "alla data"; una firma con certificato scaduto ma marcata nel periodo di validità
   resta valida; estrazione del documento da un `.p7m` o da un `.tsd`;
@@ -60,7 +61,7 @@ nel menu delle applicazioni. Su KDE Plasma nome utente e password vengono ricord
 Per disinstallare: `sudo pacman -Rs aruba-firma`.
 
 (In alternativa, se qualcuno ti ha dato solo il file `.pkg.tar.zst` senza il resto del
-repository: `sudo pacman -U aruba-firma-0.2.0-1-any.pkg.tar.zst`.)
+repository: `sudo pacman -U aruba-firma-0.3.0-1-any.pkg.tar.zst`.)
 
 ## Uso
 
@@ -74,7 +75,9 @@ aruba-firma configura                      # aggiunge un account (nome a scelta,
 aruba-firma pdf contratto.pdf              # firma un PDF  -> contratto_firmato.pdf
 aruba-firma pdf --timbro --pagina ultima --posizione basso-destra a.pdf b.pdf   # più file, un solo OTP
 aruba-firma p7m fattura.xml                # busta .p7m    -> fattura.xml.p7m
-aruba-firma pdf --marca x.pdf              # firma con marca temporale (per sempre: configura --marca si)
+aruba-firma pdf --marca x.pdf              # firma con la marca temporale di Aruba
+aruba-firma pdf --marca-gratuita x.pdf     # firma con la marca gratuita del servizio pubblico belga
+aruba-firma configura --marca belgio       # per sempre, per quell'account: aruba, belgio oppure no
 aruba-firma p7m --marca --tipo-marca TSD x.xml   # T (predefinito), LT, oppure TSD: x.xml.p7m.tsd
 aruba-firma marca nota.txt                 # marca temporale su un file, senza firma né OTP -> nota.txt.tsd
 aruba-firma marca --formato tsr nota.txt   # solo la marca, nota.txt.tsr, da tenere insieme al file
@@ -82,7 +85,7 @@ aruba-firma verifica documento.pdf.p7m     # firma valida? chi ha firmato? quand
 aruba-firma verifica nota.txt.tsr [--originale nota.txt]   # marche .tsd/.tsr; --alla-data GG/MM/AAAA per il passato
 aruba-firma estrai documento.pdf.p7m       # tira fuori il documento originale (anche da un .tsd)
 aruba-firma pdf --account Papà x.pdf       # con più account
-aruba-firma configura --credenziali-marca  # un account TSA separato (altrimenti si usano le credenziali di firma)
+aruba-firma configura --credenziali-marca  # un account TSA di Aruba comprato a parte
 aruba-firma diagnostica [--credenziali]    # controlli utili per l'assistenza
 aruba-firma <comando> --help
 ```
@@ -95,6 +98,26 @@ marca temporale si salva con `configura --credenziali-marca`. Per questo la marc
 non la si attiva; quando è richiesta e non arriva, il file non viene salvato e il messaggio spiega cosa
 fare. Per marcare un file **senza** firmarlo (`marca`, `.tsd`/`.tsr`) e per la busta `.p7m.tsd` serve
 sempre un account di marca temporale, come in Aruba Sign.
+
+### Marca temporale gratuita
+
+In alternativa c'è la marca temporale del **governo federale belga** (servizio pubblico gratuito,
+`http://tsa.belgium.be/connect`): è una marca **qualificata** secondo il regolamento europeo eIDAS e
+per l'art. 41 vale come qualificata in tutti i paesi dell'Unione, Italia compresa. Si sceglie
+nell'account («Marca temporale gratuita») o con `--marca-gratuita`. Aruba firma come sempre, poi il
+programma chiede la marca e la aggiunge: ai PDF come marca sul documento (il PDF firmato da Aruba resta
+intatto, la marca si aggiunge dopo), ai `.p7m` come marca sulla firma (CAdES-T). Al servizio arriva
+solo un'impronta (hash) della firma, mai il documento.
+
+Ogni marca ricevuta viene controllata prima di salvarla: deve riferirsi proprio a quella firma ed
+essere firmata da un servizio qualificato presente negli elenchi ufficiali europei. Se il servizio non
+risponde, o la risposta non supera i controlli, si riprova fino a 3 volte; poi il documento viene
+salvato **firmato ma senza marca**, e il programma lo dice chiaramente (la firma resta valida).
+
+Le condizioni d'uso del servizio
+(https://repository.eid.belgium.be/downloads/timestamp/fr/timestamping.pdf) dicono che è gratuito,
+**destinato a un uso non commerciale**, con limiti di volume, e che può essere interrotto in qualsiasi
+momento senza garanzie. Per un uso professionale o commerciale conviene la marca di Aruba.
 
 Il dominio di firma è `firma` per le firme comprate su pec.it (il selfcare mostra
 `utente@firma`); le firme rilasciate da un'organizzazione hanno il loro dominio (`frNomeEnte`).
@@ -119,5 +142,5 @@ packaging/arch/build.sh     # risultato in dist/arch/, poi installato
 ```
 
 Note tecniche sul servizio Aruba in `docs/arss-notes.md` (comprese le ipotesi sulle marche temporali
-da confermare con il test live); cosa viene salvato e dove, e come vengono trattati i file ricevuti da
-altri, in `docs/privacy.md`.
+da confermare con il test live); cosa viene salvato e dove, cosa riceve il servizio della marca gratuita,
+e come vengono trattati i file ricevuti da altri, in `docs/privacy.md`.
