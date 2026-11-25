@@ -118,7 +118,7 @@ How this client maps it onto ARSS, and what `FIRMA_LIVE=1 uv run pytest -m live 
 | # | Assumption | Live check | Result |
 |---|---|---|---|
 | A0 | A plain signature (`requiredmark=false`) may already carry a TST (SelfCare "Marca Automatica") | `has_timestamp` on the un-marked output, recorded | TBD |
-| A1 | ~~The signing credentials are accepted as `tsaAuth`~~ → **No** (offline check 2026-11-24, see below): Firma Remota's included marks are applied by Aruba's server; a TSA account is a separate product. The client now sends `requiredmark=true` **without** `tsa_identity` unless a TSA account is saved | T signatures without `tsa_identity` succeed | TBD |
+| A1 | ~~The signing credentials are accepted as `tsaAuth`~~ → **No** (offline check 2026-11-24, see below; **confirmed 2026-11-25**: `servizi.arubapec.it/tsa/marcheresidue.php` answers `401 Basic realm="tsa"` to the Firma Remota credentials, both as `utente` and `utente@firma`, from the browser and from the wallet). Firma Remota's included marks are applied by Aruba's server; a TSA account is a separate product. The client sends `requiredmark=true` **without** `tsa_identity` unless a TSA account is saved | T signatures without `tsa_identity` succeed | credentials: confirmed not a TSA account |
 | A2 | `PADESBES` + `requiredmark=true` (no `tsa_identity`) → signature timestamp inside the PDF (level T) | `has_timestamp(PADES)`; `checks[0].timestamp` present | TBD |
 | A3 | `pkcs7signV2` + `requiredmark=true` → CAdES-T (unsigned `signature_time_stamp_token`) | same on the `.p7m` | TBD |
 | A4 | `PADESLTV` + mark → LT (TST plus revocation data / DocTimeStamp), still verifiable | `verify_file(...).ok`; shape and marks spent recorded | TBD |
