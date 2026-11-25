@@ -310,35 +310,35 @@ def test_verifica_tsd_and_at_date(pki, make_p7m, make_tsd, tmp_path, monkeypatch
 
 # --- marche temporali -------------------------------------------------------------------------------
 
-def test_timestamp_on_by_default_and_flags(api, configured, tmp_path, make_pdf, monkeypatch, capsys):
+def test_timestamp_off_by_default_and_flags(api, configured, tmp_path, make_pdf, monkeypatch, capsys):
     from firmaremota import verify
-    from firmaremota.models import Kind, TimestampType, TsaCredentials
+    from firmaremota.models import Kind, TimestampType
 
     (tmp_path / "a.pdf").write_bytes(make_pdf(A4))
     answers(monkeypatch, "12345678")
     assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 0
-    assert api.tsa_seen == [(None, TimestampType.T)]  # no TSA account: Aruba's own (included) mark
-    assert verify.has_timestamp(Kind.PADES, (tmp_path / "a_firmato.pdf").read_bytes())
+    assert api.tsa_seen == [(None, None)] and "marca temporale" not in capsys.readouterr().out  # off by default
+    answers(monkeypatch, "12345678")
+    assert cli.main(["pdf", "--marca", str(tmp_path / "a.pdf")]) == 0
+    assert api.tsa_seen[-1] == (None, TimestampType.T)  # asked from Aruba with requiredmark, no TSA account
+    assert verify.has_timestamp(Kind.PADES, (tmp_path / "a_firmato (2).pdf").read_bytes())
     assert "— con marca temporale" in capsys.readouterr().out
     answers(monkeypatch, "12345678")
-    assert cli.main(["pdf", "--senza-marca", str(tmp_path / "a.pdf")]) == 0
-    assert api.tsa_seen[-1] == (None, None) and "marca temporale" not in capsys.readouterr().out
-    answers(monkeypatch, "12345678")
-    assert cli.main(["p7m", "--tipo-marca", "LT", str(tmp_path / "a.pdf")]) == 0
+    assert cli.main(["p7m", "--marca", "--tipo-marca", "LT", str(tmp_path / "a.pdf")]) == 0
     assert api.tsa_seen[-1][1] == TimestampType.LT
 
 
-def test_profile_setting_off_and_marca_flag_on(api, configured, tmp_path, make_pdf, monkeypatch):
+def test_profile_setting_on_and_senza_marca_flag(api, configured, tmp_path, make_pdf, monkeypatch):
     from firmaremota import profiles
     from firmaremota.models import TimestampType
 
     (profile,) = profiles.load_all(configured)
-    profiles.upsert(configured, [profile], dataclasses.replace(profile, timestamp=False))
+    profiles.upsert(configured, [profile], dataclasses.replace(profile, timestamp=True))  # "Marca sempre" on
     (tmp_path / "a.pdf").write_bytes(make_pdf(A4))
     answers(monkeypatch, "12345678")
-    assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 0 and api.tsa_seen[-1] == (None, None)
+    assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 0 and api.tsa_seen[-1][1] == TimestampType.T
     answers(monkeypatch, "12345678")
-    assert cli.main(["pdf", "--marca", str(tmp_path / "a.pdf")]) == 0 and api.tsa_seen[-1][1] == TimestampType.T
+    assert cli.main(["pdf", "--senza-marca", str(tmp_path / "a.pdf")]) == 0 and api.tsa_seen[-1] == (None, None)
 
 
 def test_p7m_tsd_level_wraps(api, configured, tmp_path, monkeypatch, capsys):
@@ -346,11 +346,11 @@ def test_p7m_tsd_level_wraps(api, configured, tmp_path, monkeypatch, capsys):
     from firmaremota.models import TsaCredentials
 
     (tmp_path / "fattura.xml").write_bytes(b"<f/>")
-    assert cli.main(["p7m", "--tipo-marca", "TSD", str(tmp_path / "fattura.xml")]) == 1  # no TSA account yet
+    assert cli.main(["p7m", "--marca", "--tipo-marca", "TSD", str(tmp_path / "fattura.xml")]) == 1  # no TSA account yet
     assert "account di marca temporale" in capsys.readouterr().err and api.calls == []
     profiles.set_tsa(configured, profiles.load_all(configured)[0], TsaCredentials("tsa", "pw"))
     answers(monkeypatch, "12345678")
-    assert cli.main(["p7m", "--tipo-marca", "TSD", str(tmp_path / "fattura.xml")]) == 0
+    assert cli.main(["p7m", "--marca", "--tipo-marca", "TSD", str(tmp_path / "fattura.xml")]) == 0
     assert (tmp_path / "fattura.xml.p7m.tsd").exists() and api.names().count("timestamp_file") == 1
 
 

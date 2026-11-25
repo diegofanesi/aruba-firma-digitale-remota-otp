@@ -117,7 +117,7 @@ How this client maps it onto ARSS, and what `FIRMA_LIVE=1 uv run pytest -m live 
 
 | # | Assumption | Live check | Result |
 |---|---|---|---|
-| A0 | A plain signature (`requiredmark=false`) may already carry a TST (SelfCare "Marca Automatica") | `has_timestamp` on the un-marked output, recorded | TBD |
+| A0 | A plain signature (`requiredmark=false`) may already carry a TST (SelfCare "Marca Automatica") | `has_timestamp` on the un-marked output, recorded | **This account: no.** The SelfCare Home shows "Marca automaticamente tutti i documenti firmati" only for "Firma Remota con marcatura illimitata" (guide, 2026-11-25); the user's panel has no such option → the service doesn't include timestamps. Default therefore **off**; the app still reports a mark if one ever comes back |
 | A1 | ~~The signing credentials are accepted as `tsaAuth`~~ → **No** (offline check 2026-11-24, see below; **confirmed 2026-11-25**: `servizi.arubapec.it/tsa/marcheresidue.php` answers `401 Basic realm="tsa"` to the Firma Remota credentials, both as `utente` and `utente@firma`, from the browser and from the wallet). Firma Remota's included marks are applied by Aruba's server; a TSA account is a separate product. The client sends `requiredmark=true` **without** `tsa_identity` unless a TSA account is saved | T signatures without `tsa_identity` succeed | credentials: confirmed not a TSA account |
 | A2 | `PADESBES` + `requiredmark=true` (no `tsa_identity`) → signature timestamp inside the PDF (level T) | `has_timestamp(PADES)`; `checks[0].timestamp` present | TBD |
 | A3 | `pkcs7signV2` + `requiredmark=true` → CAdES-T (unsigned `signature_time_stamp_token`) | same on the `.p7m` | TBD |
@@ -160,8 +160,10 @@ ARSS example `gist.github.com/marcodebe/6138525`, and the ArubaSign 2 package's 
 - Consequences applied to the code: no silent fallback to the signing credentials; standalone `marca` and the
   `.p7m.tsd` wrap require a saved TSA account (as ArubaSign does), with an explanatory error before any OTP;
   signatures with a timestamp send `requiredmark=true` and, only when a TSA account is saved, `tsa_identity`.
-- **Still only the live test can tell:** whether this account's "Marca Automatica" is on (A0), whether
-  `requiredmark=true` forces the mark when it is off (A2/A3), what LT looks like (A4/A5), the TSU chain (A7).
+- **Still only the live test can tell:** whether `requiredmark=true` on an account without the add-on is
+  refused or ignored (A2/A3; expected: refused), what LT looks like (A4/A5), the TSU chain (A7). With no
+  timestamp product on this account, the live test is now about shapes and error texts, not about a feature
+  the user can use: low priority until a TSA pack or the add-on is bought.
   Zero-cost pre-checks for the user: look at the SelfCare for "Marca Automatica"; try the Firma Remota
   credentials at `marcheresidue.php` (if accepted, they are also a TSA account and A1 was wrong the other way). ArubaSign's TSA error texts: 0049 "Credenziali errate...", 0074 "Hai esaurito le tue marche
 temporali", 0073/0078/0080 service unreachable, 0079 too many requests, 0081/0082 account disabled/expired,

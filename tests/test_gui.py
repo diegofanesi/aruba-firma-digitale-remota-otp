@@ -87,7 +87,6 @@ def test_sign_pdf_with_stamp(window, api, qtbot, tmp_path, make_pdf):
     window.options.stamp.setChecked(True)
     window.options.corner_buttons[Position.TOP_LEFT].setChecked(True)
     window.options.text.setText("Visto")
-    window.options.timestamp.setChecked(False)
     window.options.sign.click()
     wait_for(qtbot, window, window.result)
     assert window.result.title.text() == "Fatto! 2 documenti firmati."
@@ -106,11 +105,11 @@ def test_sign_other_file_single_result(window, qtbot, tmp_path):
     window.choose_files = Recorder([str(tmp_path / "fattura.xml")])
     window.home.sign_other.click()
     assert window.stack.currentWidget() is window.options  # also for .p7m, now: the timestamp choice lives there
-    assert not window.options.stamp.isVisibleTo(window) and window.options.timestamp.isChecked()
+    assert not window.options.stamp.isVisibleTo(window) and not window.options.timestamp.isChecked()  # off by default
     assert window.options.title.text() == "Firma un file (.p7m)"
     window.options.sign.click()
     wait_for(qtbot, window, window.result)
-    assert window.result.title.text() == "Fatto! Documento firmato e marcato temporalmente."
+    assert window.result.title.text() == "Fatto! Documento firmato."
     window.result.open_document.click()
     assert window.open_url.calls[-1] == (tmp_path / "fattura.xml.p7m",)
 
@@ -167,7 +166,7 @@ def test_partial_batch_and_retry(window, api, qtbot, tmp_path, make_pdf):
     window.stack.setCurrentWidget(window.home)
     window.result.retry.click()
     wait_for(qtbot, window, window.result)
-    assert window.result.title.text() == "Fatto! Documento firmato e marcato temporalmente."  # timestamps are on by default
+    assert window.result.title.text() == "Fatto! Documento firmato."
     assert len(window.ask_otp.calls) == 2 and (tmp_path / "b_firmato.pdf").exists()
 
 
@@ -496,7 +495,8 @@ def test_sign_pdf_with_timestamp_passes_tsa_and_level(window, api, qtbot, tmp_pa
 
     window.choose_files = Recorder(pdfs(tmp_path, make_pdf, "a.pdf"))
     window.home.sign_pdf.click()
-    assert window.options.timestamp.isChecked() and window.options.level.isEnabled()
+    assert not window.options.timestamp.isChecked() and not window.options.level.isEnabled()  # off by default
+    window.options.timestamp.setChecked(True)
     assert [window.options.level.itemData(i) for i in range(window.options.level.count())] == ["T", "LT"]  # no TSD for PDFs
     window.options.level.setCurrentIndex(1)
     window.options.sign.click()
@@ -510,17 +510,18 @@ def test_options_timestamp_preset_from_profile(window, api, qtbot, store, tmp_pa
     import dataclasses
 
     from firmaremota import profiles
+    from firmaremota.models import TimestampType
 
     (profile,) = profiles.load_all(store)
-    profiles.upsert(store, [profile], dataclasses.replace(profile, timestamp=False))
-    window.reload_profiles() if hasattr(window, "reload_profiles") else None
+    profiles.upsert(store, [profile], dataclasses.replace(profile, timestamp=True))  # "Marca sempre" on
     window.current = profiles.load_all(store)[0]
     window.choose_files = Recorder(pdfs(tmp_path, make_pdf, "a.pdf"))
     window.home.sign_pdf.click()
-    assert not window.options.timestamp.isChecked() and not window.options.level.isEnabled()
+    assert window.options.timestamp.isChecked() and window.options.level.isEnabled()
     window.options.sign.click()
     wait_for(qtbot, window, window.result)
-    assert api.tsa_seen == [(None, None)] and window.result.title.text() == "Fatto! Documento firmato."
+    assert api.tsa_seen == [(None, TimestampType.T)]
+    assert window.result.title.text() == "Fatto! Documento firmato e marcato temporalmente."
 
 
 def test_p7m_tsd_level_wraps(window, api, qtbot, store, tmp_path):
@@ -531,6 +532,7 @@ def test_p7m_tsd_level_wraps(window, api, qtbot, store, tmp_path):
     window.choose_files = Recorder([str(tmp_path / "fattura.xml")])
     window.home.sign_other.click()
     assert [window.options.level.itemData(i) for i in range(window.options.level.count())] == ["T", "LT", "TSD"]
+    window.options.timestamp.setChecked(True)
     window.options.level.setCurrentIndex(2)
     window.options.sign.click()  # no TSA account: refused before the OTP, with the explanation
     assert "account di marca temporale" in window.show_error.calls[-1][1] and window.ask_otp.calls == []
@@ -586,6 +588,7 @@ def test_timestamp_error_offers_retry_without_timestamp(window, api, qtbot, tmp_
     api.timestamp_error = TimestampError("TSA no")
     window.choose_files = Recorder(pdfs(tmp_path, make_pdf, "a.pdf", "b.pdf"))
     window.home.sign_pdf.click()
+    window.options.timestamp.setChecked(True)
     window.options.sign.click()
     wait_for(qtbot, window, window.result)
     assert window.result.title.text() == "Nessun documento è stato firmato."
@@ -616,17 +619,17 @@ def test_profile_dialog_timestamp_settings(qtbot, store, api):
     (mario,) = profiles.load_all(store)
     dialog = ProfileEditDialog(None, lambda: api, store, [mario], mario)
     qtbot.addWidget(dialog)
-    assert dialog.timestamp.isChecked() and not dialog.tsa_separate.isChecked() and not dialog.tsa_user.isEnabled()
+    assert not dialog.timestamp.isChecked() and not dialog.tsa_separate.isChecked() and not dialog.tsa_user.isEnabled()
     dialog.tsa_separate.setChecked(True)
     dialog.check.click()  # separate account chosen but empty: refused before anything is sent
     assert "account TSA" in dialog.status.text() and api.calls == []
     dialog.tsa_user.setText("tsa-user")
     dialog.tsa_password.setText("tsa-pw")
-    dialog.timestamp.setChecked(False)
+    dialog.timestamp.setChecked(True)
     dialog.check.click()
     qtbot.waitUntil(lambda: dialog.result() == QDialog.DialogCode.Accepted, timeout=10000)
     saved = profiles.load_all(store)[0]
-    assert saved.timestamp is False and profiles.tsa_account(store, saved) == TsaCredentials("tsa-user", "tsa-pw")
+    assert saved.timestamp is True and profiles.tsa_account(store, saved) == TsaCredentials("tsa-user", "tsa-pw")
     again = ProfileEditDialog(None, lambda: api, store, [saved], saved)
     qtbot.addWidget(again)
     assert again.tsa_separate.isChecked() and again.tsa_user.text() == "tsa-user" and again.tsa_password.text() == ""
@@ -637,7 +640,7 @@ def test_profile_dialog_timestamp_settings(qtbot, store, api):
 
 
 def test_profiles_dialog_marks_accounts_without_timestamp(qtbot, store, api):
-    add_profile(store, "Anna", "anna.bianchi@firma", "pw", timestamp=False)
+    add_profile(store, "Anna", "anna.bianchi@firma", "pw", timestamp=True)
     dialog = ProfilesDialog(None, lambda: api, store, profiles.load_all(store))
     qtbot.addWidget(dialog)
-    assert "(senza marca temporale)" in dialog.list.item(1).text() and "senza marca" not in dialog.list.item(0).text()
+    assert "(senza marca temporale)" in dialog.list.item(0).text() and "senza marca" not in dialog.list.item(1).text()

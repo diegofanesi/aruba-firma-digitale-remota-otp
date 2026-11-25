@@ -23,9 +23,10 @@ Progress = Callable[[int, int, str], None]  # (done, total, current file name)
 NOT_REACHED = "Non firmato: la firma si è interrotta per l'errore precedente."
 CANCELLED = "Non firmato: annullato."
 NO_TIMESTAMP = (
-    "Aruba ha firmato {name} ma senza la marca temporale richiesta: non salvato. Riprova, firma senza marca, "
-    "oppure controlla le credenziali TSA dell'account (o attiva la marca automatica nel SelfCare di Aruba: "
-    "https://selfcare.firma-remota.it)."
+    "Aruba ha firmato {name} ma senza la marca temporale richiesta: non salvato. Firma senza marca, oppure: "
+    "se il tuo servizio è una «Firma Remota con marcatura illimitata», attiva «Marca automaticamente tutti i "
+    "documenti firmati» nel SelfCare (https://selfcare.firma-remota.it); altrimenti le marche si comprano a "
+    "pacchetti e l'account TSA si salva con «configura --credenziali-marca»."
 )
 NO_TSA_ACCOUNT = (
     "Per questa operazione serve un account di marca temporale Aruba (le marche si comprano a pacchetti; "
@@ -176,8 +177,11 @@ def _checked_input(job: SignJob) -> bytes:
 
 
 def _sign_one(api: ArssApi, auth: AuthCtx, job: SignJob, out_dir: Path | None, signer_name: str | None,
-              wrap: TsaCredentials | None = None) -> Path:
-    """Sign one file; with `wrap`, also put the signed .p7m into a .tsd envelope (ArubaSign's "TSD")."""
+              wrap: TsaCredentials | None = None) -> JobResult:
+    """Sign one file; with `wrap`, also put the signed .p7m into a .tsd envelope (ArubaSign's "TSD").
+
+    The result says whether the saved file carries a timestamp: asked for, or applied by Aruba on its own
+    (accounts with "Marca automaticamente tutti i documenti firmati" get one without asking)."""
     data = _checked_input(job)
     if job.kind is Kind.PADES:
         spec = job.stamp
@@ -202,13 +206,15 @@ def _sign_one(api: ArssApi, auth: AuthCtx, job: SignJob, out_dir: Path | None, s
         raise ServiceError(MISMATCH.format(name=job.src.name))
     if not verify.signatures_intact(job.kind, signed):
         raise ServiceError(BROKEN.format(name=job.src.name))
-    if auth.level in (TimestampType.T, TimestampType.LT) and not verify.has_timestamp(job.kind, signed):
+    timestamped = verify.has_timestamp(job.kind, signed)
+    if auth.level in (TimestampType.T, TimestampType.LT) and not timestamped:
         raise TimestampError(NO_TIMESTAMP.format(name=job.src.name))
     if wrap is not None:  # TSD: the signed envelope itself gets timestamped
         signed, name = _wrapped(api, wrap, signed, job.src.name), files.tsd_name(Path(name))
+        timestamped = True
     output = files.write_new(output_dir(job, out_dir), name, signed)
     register_paths(output)
-    return output
+    return JobResult(job, output=output, timestamped=timestamped)
 
 
 def _wrapped(api: ArssApi, tsa: TsaCredentials, data: bytes, name: str) -> bytes:
@@ -281,7 +287,7 @@ def sign_batch(
             if progress:
                 progress(index, len(jobs), job.src.name)
             try:
-                results.append(JobResult(job, output=_sign_one(api, auth, job, out_dir, signer_name, wrap)))
+                results.append(_sign_one(api, auth, job, out_dir, signer_name, wrap))
             except FileError as exc:
                 log.warning("%s: %s", job.src.name, exc.message)
                 results.append(JobResult(job, error=exc))
@@ -348,7 +354,7 @@ def timestamp_batch(
         if progress:
             progress(index, len(jobs), job.src.name)
         try:
-            results.append(JobResult(job, output=_timestamp_one(api, tsa, job, out_dir)))
+            results.append(JobResult(job, output=_timestamp_one(api, tsa, job, out_dir), timestamped=True))
         except FileError as exc:
             log.warning("%s: %s", job.src.name, exc.message)
             results.append(JobResult(job, error=exc))

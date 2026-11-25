@@ -99,11 +99,11 @@ def test_loading_registers_personal_values_for_the_log():
 
 def test_timestamp_flag_roundtrip_and_default():
     store = MemoryStore()
-    saved = profiles.upsert(store, [], profiles.new_profile("Mario", "mario.rossi", "firma", timestamp=False))
+    saved = profiles.upsert(store, [], profiles.new_profile("Mario", "mario.rossi", "firma", timestamp=True))
     saved = profiles.upsert(store, saved, profiles.new_profile("Anna", "anna", "firma"))
-    assert [p.timestamp for p in profiles.load_all(store)] == [False, True]
+    assert [p.timestamp for p in profiles.load_all(store)] == [True, False]
     store.data[profiles.INDEX_KEY] = json.dumps([{"id": "a1", "alias": "Vecchio", "login": "x@firma"}])  # older layout
-    assert profiles.load_all(store)[0].timestamp is True
+    assert profiles.load_all(store)[0].timestamp is False
 
 
 def test_tsa_account_fallback_and_saved():

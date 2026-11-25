@@ -4,7 +4,7 @@ Everything lives in the wallet; nothing is written to disk. Entry names are fixe
 never personal:
 
     profili         JSON list of {"id", "alias", "login", "marca"} (the value is what the wallet encrypts);
-                    "marca" (default true) = sign with a timestamp, ArubaSign's "Marca sempre i file firmati"
+                    "marca" (default false) = sign with a timestamp, ArubaSign's "Marca sempre i file firmati"
     password:<id>   the password of that profile; absent when the user chose not to remember it
     marca:<id>      JSON {"user", "password", "url"} of a separate time-stamping (TSA) account; absent
                     when the signing credentials themselves are used for timestamps
@@ -33,7 +33,7 @@ class Profile:
     alias: str
     user: str
     domain: str
-    timestamp: bool = True  # sign with a timestamp by default ("Marca sempre i file firmati")
+    timestamp: bool = False  # "Marca sempre i file firmati": off until the user turns it on (as in ArubaSign)
 
     @property
     def login(self) -> str:
@@ -48,7 +48,7 @@ class Profile:
         return f"marca:{self.id}"
 
 
-def new_profile(alias: str, user: str, domain: str, id: str | None = None, timestamp: bool = True) -> Profile:
+def new_profile(alias: str, user: str, domain: str, id: str | None = None, timestamp: bool = False) -> Profile:
     if "@" in user:  # "utente@dominio" typed as the username, the way Aruba's selfcare shows it
         user, domain = split_login(user)
     alias, user, domain = alias.strip(), user.strip(), domain.strip() or "firma"
@@ -71,7 +71,7 @@ def load_all(store: Store) -> list[Profile]:
         profiles = []
         for item in json.loads(raw):
             user, domain = split_login(item["login"])
-            profiles.append(Profile(str(item["id"]), str(item["alias"]), user, domain, bool(item.get("marca", True))))
+            profiles.append(Profile(str(item["id"]), str(item["alias"]), user, domain, bool(item.get("marca", False))))
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise CredentialStoreError("L'elenco degli account nel portachiavi è danneggiato.", detail=str(exc)) from None
     for profile in profiles:

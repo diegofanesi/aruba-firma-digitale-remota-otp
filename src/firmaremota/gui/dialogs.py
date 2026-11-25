@@ -164,9 +164,12 @@ class ProfileEditDialog(QDialog):
         # Timestamps, as in Aruba Sign's settings: "Marca sempre i file firmati" and the TSA account.
         group = QGroupBox("Marca temporale")
         box = QVBoxLayout(group)
-        self.timestamp = QCheckBox("Marca sempre i file firmati (data certa; consigliato)")
-        self.timestamp.setChecked(profile.timestamp if profile else True)
+        self.timestamp = QCheckBox("Marca sempre i file firmati (data certa)")
+        self.timestamp.setChecked(profile.timestamp if profile else False)
         box.addWidget(self.timestamp)
+        box.addWidget(_label("Funziona se il servizio include la marcatura (Firma Remota con marcatura illimitata, "
+                             "con «Marca automaticamente» attiva nel SelfCare) oppure con un account di marca temporale.",
+                             style="color: #555;"))
         saved_tsa = profiles.tsa_account(store, profile) if profile else None
         self.tsa_separate = QCheckBox("Ho un account di marca temporale (TSA) comprato a parte: serve per marcare "
                                       "file senza firmarli")

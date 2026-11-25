@@ -214,7 +214,7 @@ def api_t(make_p7m, sign_pdf, make_cades_t, make_tsd, make_tsr):
 @pytest.mark.parametrize("level", [TimestampType.T, TimestampType.LT])
 def test_sign_batch_passes_tsa_and_level_and_outputs_have_timestamps(docs, api_t, level):
     results = service.sign_batch(api_t, ACCOUNT, "pw", OTP, jobs(docs), tsa=TSA, level=level)
-    assert [r.ok for r in results] == [True, True, True]
+    assert [r.ok for r in results] == [True, True, True] and all(r.timestamped for r in results)
     assert api_t.tsa_seen == [(TSA, level)] * 3
     for result in results:
         assert verify.has_timestamp(result.job.kind, result.output.read_bytes())
@@ -225,6 +225,14 @@ def test_no_timestamp_requested_means_none_asked(docs, api_t):
     results = service.sign_batch(api_t, ACCOUNT, "pw", OTP, jobs(docs))
     assert api_t.tsa_seen == [(None, None)] * 3
     assert not any(verify.has_timestamp(r.job.kind, r.output.read_bytes()) for r in results)
+    assert not any(r.timestamped for r in results)
+
+
+def test_a_mark_applied_by_aruba_on_its_own_is_noticed(docs, make_p7m, sign_pdf, make_cades_t):
+    """Accounts with "Marca automaticamente" get a timestamp without asking: the result says so."""
+    api = FakeArss(make_p7m=make_cades_t, sign_pdf=lambda pdf, timestamp=False: sign_pdf(pdf, timestamp=True))
+    results = service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs))
+    assert all(r.ok and r.timestamped for r in results) and api.tsa_seen == [(None, None)] * 3
 
 
 def test_timestamp_without_tsa_account_relies_on_aruba(docs, api_t):

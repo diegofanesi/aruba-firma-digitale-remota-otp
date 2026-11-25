@@ -102,6 +102,7 @@ class JobResult:
     job: SignJob
     output: Path | None = None
     error: FirmaError | None = None
+    timestamped: bool = False  # the saved file carries a timestamp (asked for, or applied by Aruba on its own)
 
     @property
     def ok(self) -> bool:

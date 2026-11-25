@@ -99,11 +99,11 @@ def _credentials(args: argparse.Namespace, settings: config.Settings):
 
 
 def _timestamp_wanted(args: argparse.Namespace, profile: profiles.Profile | None) -> bool:
-    """--marca / --senza-marca win; otherwise the account's setting (on by default, also for typed logins)."""
+    """--marca / --senza-marca win; otherwise the account's "Marca sempre" setting (off for typed logins)."""
     wanted = getattr(args, "marca", None)
     if wanted is not None:
         return wanted
-    return profile.timestamp if profile is not None else True
+    return profile.timestamp if profile is not None else False
 
 
 def _remember_profile(settings: config.Settings, profile: profiles.Profile | None) -> None:
@@ -183,7 +183,7 @@ def _sign(args: argparse.Namespace, kind: Kind) -> int:
     otp = _ask_otp()
     results = service.sign_batch(api, account, password, otp, jobs, out_dir=out_dir, signer_name=signer.name,
                                  progress=_progress, tsa=tsa, level=level)
-    return _report(results, "Firmato", "Non firmato", with_mark.strip(", "))
+    return _report(results, "Firmato", "Non firmato")
 
 
 def _progress(done: int, total: int, name: str) -> None:
@@ -191,10 +191,11 @@ def _progress(done: int, total: int, name: str) -> None:
         print(f"[{done + 1}/{total}] {name}")
 
 
-def _report(results, done: str, failed: str, note: str = "") -> int:
+def _report(results, done: str, failed: str) -> int:
     for result in results:
         if result.ok:
-            print(f"{done}: {result.output}" + (f" — {note}" if note else ""))
+            mark = " — con marca temporale" if result.timestamped and done == "Firmato" else ""
+            print(f"{done}: {result.output}{mark}")
         else:
             print(f"{failed}: {result.job.src.name}: {result.error.message}", file=sys.stderr)
     ok = sum(r.ok for r in results)
@@ -299,7 +300,7 @@ def _needs_profile(args: argparse.Namespace) -> bool:
 def _timestamp_label(store, profile: profiles.Profile) -> str:
     if not profile.timestamp:
         return "marca temporale: no"
-    return "marca temporale: sì (" + ("account TSA" if store.get(profile.tsa_key) else "marca automatica di Aruba") + ")"
+    return "marca temporale: sì (" + ("account TSA" if store.get(profile.tsa_key) else "richiesta ad Aruba") + ")"
 
 
 def cmd_configura(args: argparse.Namespace) -> int:
@@ -384,7 +385,7 @@ def cmd_configura(args: argparse.Namespace) -> int:
     print("Controllo le credenziali con Aruba (non serve il codice OTP)...")
     _, signer = service.prepare_account(api, user, domain, password)
     profile = profiles.new_profile(alias, user, domain, id=editing.id if editing else None,
-                                   timestamp=editing.timestamp if editing else True)
+                                   timestamp=editing.timestamp if editing else False)
     profiles.upsert(store, available, profile)
     if remember:
         profiles.set_password(store, profile, password)
@@ -401,6 +402,9 @@ def cmd_configura(args: argparse.Namespace) -> int:
         print(f"Nome utente in {store.name}; la password verrà chiesta a ogni firma.")
     if profile.timestamp:
         print("Marca temporale: attiva (le firme avranno data certa; per disattivarla: aruba-firma configura --marca no).")
+    else:
+        print("Marca temporale: non attiva. Serve un servizio che la includa (Firma Remota con marcatura illimitata) o un "
+              "account di marca temporale; poi: aruba-firma configura --marca si")
     return EXIT_OK
 
 
@@ -558,7 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
     only.add_argument("--rimuovi", action="store_true", help="rimuove l'account dal portachiavi")
     only.add_argument("--dimentica-tutto", action="store_true", help="rimuove tutti gli account dal portachiavi")
     only.add_argument("--marca", choices=["si", "no"], help="mettere la marca temporale su tutto ciò che si firma? "
-                                                              "(predefinito: si)")
+                                                              "(predefinito: no)")
     only.add_argument("--credenziali-marca", action="store_true",
                       help="salva l'account di marca temporale (TSA) comprato a parte: serve per marcare file senza "
                            "firmarli e per la busta .tsd (le firme usano la marca automatica di Aruba)")

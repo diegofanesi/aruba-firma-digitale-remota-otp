@@ -352,11 +352,12 @@ class ResultPage(QWidget):
         bottom.addWidget(self.home)
         layout.addLayout(bottom)
 
-    def show_results(self, results: list[JobResult], mode: str = "sign", timestamped: bool = False) -> None:
-        """`mode` "sign" or "timestamp"; `timestamped`: the signatures carry a timestamp (ArubaSign:
-        "Il documento è stato firmato e marcato temporalmente")."""
+    def show_results(self, results: list[JobResult], mode: str = "sign") -> None:
+        """`mode` "sign" or "timestamp". Signed files that came back with a timestamp (asked for, or applied by
+        Aruba on its own) are announced as ArubaSign does: "firmato e marcato temporalmente"."""
         signed = [r for r in results if r.ok]
         total = len(results)
+        timestamped = bool(signed) and all(r.timestamped for r in signed)
         if mode == "timestamp":
             one, many = "marcato", "marcati"
         else:
@@ -640,7 +641,7 @@ class MainWindow(QMainWindow):
             self.prepare_sign(paths, Kind.CADES)
 
     def timestamp_default(self) -> bool:
-        return self.current.timestamp if self.current else True
+        return self.current.timestamp if self.current else False
 
     def prepare_sign(self, paths: list[str], kind: Kind, note: str = "", timestamp: bool | None = None) -> None:
         self.paths = [Path(p) for p in paths]
@@ -744,7 +745,7 @@ class MainWindow(QMainWindow):
 
     def sign_done(self, results: list[JobResult]) -> None:
         self.results = results
-        self.result.show_results(results, timestamped=self.last_level is not None)
+        self.result.show_results(results)
         self.stack.setCurrentWidget(self.result)
 
     # --- standalone timestamps --------------------------------------------------------------------

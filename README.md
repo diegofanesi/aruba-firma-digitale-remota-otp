@@ -8,9 +8,9 @@ resta sui server Aruba e ogni firma è autorizzata con nome utente, password e c
 - firma di PDF (PAdES, il file resta un PDF) e di qualsiasi file (busta CAdES `.p7m`);
 - più documenti con un solo codice OTP;
 - timbro visibile sul PDF (pagina e angolo a scelta);
-- **marca temporale** (data certa) sulle firme, come in Aruba Sign: attiva per impostazione
-  predefinita, tipo T, LT o TSD (`.p7m.tsd`); marca temporale anche su un file da solo, senza
-  firmarlo (`.tsd` o `.tsr`);
+- **marca temporale** (data certa) sulle firme, come in Aruba Sign («Marca sempre i file firmati»,
+  da attivare per account; tipo T, LT o TSD, `.p7m.tsd`); marca temporale anche su un file da solo,
+  senza firmarlo (`.tsd` o `.tsr`, con un account di marca temporale);
 - verifica delle firme e delle marche temporali con l'elenco ufficiale dei certificatori (AgID /
   EU), anche "alla data"; una firma con certificato scaduto ma marcata nel periodo di validità
   resta valida; estrazione del documento da un `.p7m` o da un `.tsd`;
@@ -73,8 +73,8 @@ aruba-firma configura                      # aggiunge un account (nome a scelta,
 aruba-firma pdf contratto.pdf              # firma un PDF  -> contratto_firmato.pdf
 aruba-firma pdf --timbro --pagina ultima --posizione basso-destra a.pdf b.pdf   # più file, un solo OTP
 aruba-firma p7m fattura.xml                # busta .p7m    -> fattura.xml.p7m
-aruba-firma pdf --senza-marca x.pdf        # le firme hanno la marca temporale; così no (o: configura --marca no)
-aruba-firma p7m --tipo-marca TSD x.xml     # T (predefinito), LT, oppure TSD: x.xml.p7m.tsd
+aruba-firma pdf --marca x.pdf              # firma con marca temporale (per sempre: configura --marca si)
+aruba-firma p7m --marca --tipo-marca TSD x.xml   # T (predefinito), LT, oppure TSD: x.xml.p7m.tsd
 aruba-firma marca nota.txt                 # marca temporale su un file, senza firma né OTP -> nota.txt.tsd
 aruba-firma marca --formato tsr nota.txt   # solo la marca, nota.txt.tsr, da tenere insieme al file
 aruba-firma verifica documento.pdf.p7m     # firma valida? chi ha firmato? quando? (uscita 0 valida, 5 non verificabile, 1 no)
@@ -86,11 +86,14 @@ aruba-firma diagnostica [--credenziali]    # controlli utili per l'assistenza
 aruba-firma <comando> --help
 ```
 
-Nella Firma Remota Aruba la marca temporale sulle firme è inclusa e la applica il server di Aruba
-(nel SelfCare, https://selfcare.firma-remota.it, deve essere attiva la «Marca Automatica»; il formato
-è LT): l'app la richiede con `requiredmark` e, se non arriva, non salva il file e spiega cosa fare. Per
-marcare un file **senza** firmarlo (`marca`, `.tsd`/`.tsr`) e per la busta `.p7m.tsd` serve invece un
-account di marca temporale comprato a parte (`configura --credenziali-marca`), come in Aruba Sign.
+Le marche temporali non sono comprese in tutte le Firme Remote: lo sono nella «Firma Remota con
+marcatura illimitata», che nel SelfCare (https://selfcare.firma-remota.it) mostra l'opzione «Marca
+automaticamente tutti i documenti firmati» (il server di Aruba applica la marca, formato LT). Se il
+SelfCare non mostra quell'opzione, il servizio non le include: si comprano a pacchetti e l'account di
+marca temporale si salva con `configura --credenziali-marca`. Per questo la marca è disattivata finché
+non la si attiva; quando è richiesta e non arriva, il file non viene salvato e il messaggio spiega cosa
+fare. Per marcare un file **senza** firmarlo (`marca`, `.tsd`/`.tsr`) e per la busta `.p7m.tsd` serve
+sempre un account di marca temporale, come in Aruba Sign.
 
 Il dominio di firma è `firma` per le firme comprate su pec.it (il selfcare mostra
 `utente@firma`); le firme rilasciate da un'organizzazione hanno il loro dominio (`frNomeEnte`).

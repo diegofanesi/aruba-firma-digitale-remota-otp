@@ -92,8 +92,8 @@ def test_elenco(env, capsys):
     add_profile(env.store, "Anna", "anna.bianchi@frStudio")
     assert cli.main(["configura", "--elenco"]) == 0
     out = capsys.readouterr().out
-    assert "Mario: mario.rossi@firma (password salvata; marca temporale: sì (marca automatica di Aruba))" in out
-    assert "Anna: anna.bianchi@frStudio (password non salvata; marca temporale: sì (marca automatica di Aruba))" in out
+    assert "Mario: mario.rossi@firma (password salvata; marca temporale: no)" in out
+    assert "Anna: anna.bianchi@frStudio (password non salvata; marca temporale: no)" in out
     env.store.data.clear()
     assert cli.main(["configura", "--elenco"]) == 0
     assert "Nessun account salvato" in capsys.readouterr().out
@@ -205,13 +205,14 @@ def test_configura_marca_options(env, capsys):
 
     profile = add_profile(env.store, "Mario", "mario.rossi@firma", PASSWORD)
     assert cli.main(["configura", "--elenco"]) == 0
-    assert "marca temporale: sì (marca automatica di Aruba)" in capsys.readouterr().out
+    assert "marca temporale: no" in capsys.readouterr().out  # off by default
+    assert cli.main(["configura", "--marca", "si"]) == 0
+    assert profiles.load_all(env.store)[0].timestamp is True and "attiva" in capsys.readouterr().out
+    assert cli.main(["configura", "--elenco"]) == 0
+    assert "marca temporale: sì (richiesta ad Aruba)" in capsys.readouterr().out
     assert cli.main(["configura", "--marca", "no"]) == 0
     assert profiles.load_all(env.store)[0].timestamp is False and "disattivata" in capsys.readouterr().out
-    assert cli.main(["configura", "--elenco"]) == 0
-    assert "marca temporale: no" in capsys.readouterr().out
     assert cli.main(["configura", "--marca", "si"]) == 0
-    assert profiles.load_all(env.store)[0].timestamp is True
     env.replies["input"] = ["", "https://tsa.example/ts"]  # Account TSA: keep the username; a server address
     env.replies["getpass"] = ["Pw-tsa"]
     assert cli.main(["configura", "--credenziali-marca"]) == 0
@@ -229,8 +230,8 @@ def test_configura_mentions_the_timestamp_default(env, capsys):
     env.replies["input"] = ["mario.rossi@firma", "", ""]
     env.replies["getpass"] = ["Pw-1", "Pw-1"]
     assert cli.main(["configura"]) == 0
-    assert "Marca temporale: attiva" in capsys.readouterr().out
-    assert profiles.load_all(env.store)[0].timestamp is True
+    assert "Marca temporale: non attiva" in capsys.readouterr().out
+    assert profiles.load_all(env.store)[0].timestamp is False
 
 
 @pytest.mark.parametrize("command", ["pdf", "p7m", "marca", "verifica", "estrai", "configura", "diagnostica", "gui"])

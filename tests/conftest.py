@@ -312,7 +312,7 @@ class MemoryStore:
         self.data.pop(key, None)
 
 
-def add_profile(store, alias, login, password=None, id=None, timestamp=True):
+def add_profile(store, alias, login, password=None, id=None, timestamp=False):
     """Put an account into a fake wallet the way the app lays it out; returns the Profile."""
     import json
 
