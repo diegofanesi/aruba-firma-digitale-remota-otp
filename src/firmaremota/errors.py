@@ -50,6 +50,10 @@ class TimestampError(FirmaError):
     """
 
 
+class TimestampUnavailable(TimestampError):
+    """The free time-stamping service failed every attempt: the signature is kept without a timestamp."""
+
+
 class FileError(FirmaError):
     """A local file can't be read, parsed or written."""
 

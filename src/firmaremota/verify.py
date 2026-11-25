@@ -422,18 +422,25 @@ def check_cms(signed: cms.SignedData, content: bytes, trust: Trust, external_poe
     return checks
 
 
+def _check_token(token: cms.SignedData, imprint: Callable[[str], bytes], trust: Trust,
+                 at: dt.datetime | None = None) -> TimestampInfo:
+    """One timestamp token; `imprint(algorithm)` is the digest it must carry (a mismatch: not intact)."""
+    async def validate_async(ctx):
+        return TimestampSignatureStatus(**await validate_tst_signed_data(token, ctx, imprint))
+
+    status, revocation_checked = validate_in_phases(lambda ctx: asyncio.run(validate_async(ctx)), trust, at)
+    return _timestamp_info(status, trust, revocation_checked)
+
+
 def check_tokens(tokens: list[cms.SignedData], content: bytes, trust: Trust,
                  at: dt.datetime | None = None) -> list[TimestampInfo]:
     """Standalone timestamp tokens (.tsd / .tsr) over `content`."""
-    infos = []
-    for token in tokens:
-        async def validate_async(ctx, t=token):
-            kwargs = await validate_tst_signed_data(t, ctx, lambda algo: hashlib.new(algo, content).digest())
-            return TimestampSignatureStatus(**kwargs)
+    return [_check_token(token, lambda algo: hashlib.new(algo, content).digest(), trust, at) for token in tokens]
 
-        status, revocation_checked = validate_in_phases(lambda ctx, v=validate_async: asyncio.run(v(ctx)), trust, at)
-        infos.append(_timestamp_info(status, trust, revocation_checked))
-    return infos
+
+def check_token_for_digest(token: cms.SignedData, digest: bytes, md_algorithm: str, trust: Trust) -> TimestampInfo:
+    """A token just received for `digest`: it must carry exactly that digest, with that algorithm."""
+    return _check_token(token, lambda algo: digest if algo == md_algorithm else b"", trust)
 
 
 def _best(*infos: TimestampInfo | None) -> TimestampInfo | None:
