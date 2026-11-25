@@ -6,7 +6,8 @@ release, not routinely.
 
 FIRMA_LIVE_DIR=<folder> keeps the outputs (useful to fill docs/arss-notes.md). Uses your real settings
 (~/.config/firma-remota) and the password saved in the wallet; FIRMA_LIVE_NO_TIMESTAMPS=1 skips every
-timestamp step (the pre-0.2.0 check).
+step with Aruba's timestamps (the pre-0.2.0 check); FIRMA_LIVE_NO_FREE=1 skips the free (Belgian) timestamp
+on real Aruba output (a PDF and a .p7m, no marks spent).
 
 What it confirms (docs/arss-notes.md, "Marche temporali"): A0 whether a plain signature already carries a
 timestamp; A1 the signing credentials as TSA account; A2/A3 T on PDF and .p7m; A4/A5 LT; A6 bytes; A7 the
@@ -20,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from firmaremota import config, credentials, p7m, profiles, service, tst, verify
+from firmaremota import config, credentials, p7m, profiles, service, timestamping, tst, verify
 from firmaremota.arss.client import ArssClient
 from firmaremota.models import AuthCtx, Kind, SignJob, StampSpec, TimestampType
 
@@ -31,6 +32,7 @@ pytestmark = [
 REAL_HOME = Path(os.environ.get("FIRMA_REAL_HOME") or Path.home())  # conftest sandboxes HOME
 REAL_CONFIG = REAL_HOME / ".config" / "firma-remota" / "config.ini"
 TIMESTAMPS = os.environ.get("FIRMA_LIVE_NO_TIMESTAMPS") != "1"
+FREE = os.environ.get("FIRMA_LIVE_NO_FREE") != "1"
 
 
 @pytest.fixture
@@ -74,11 +76,13 @@ def test_one_session_signs_timestamps_and_verifies_everything(real_wallet, tmp_p
     normal.write_bytes(make_pdf(a4, a4))
     rotated.write_bytes(make_pdf((595, 842, 90, None)))
     note.write_bytes("Prova firma-remota\n".encode())
-    plain_jobs = [SignJob(normal, Kind.PADES, StampSpec(text="Prova firma-remota"))]  # (0) no mark asked: A0
+    plain_jobs = [SignJob(normal, Kind.PADES, StampSpec(text="Prova firma-remota")),  # (0) no mark asked: A0
+                  SignJob(note, Kind.CADES)]
+    free_jobs = [SignJob(rotated, Kind.PADES, StampSpec(text="Prova marca gratuita")), SignJob(note, Kind.CADES)]
     t_jobs = [SignJob(rotated, Kind.PADES, StampSpec()), SignJob(note, Kind.CADES)]  # (1)(2) level T: A1 A2 A3 A6 A7
     lt_jobs = [SignJob(normal, Kind.PADES), SignJob(note, Kind.CADES)]  # (3)(4) level LT: A4 A5
     tsd_jobs = [SignJob(note, Kind.CADES)]  # (5) TSD wrap
-    for jobs in (plain_jobs, t_jobs, lt_jobs, tsd_jobs):
+    for jobs in (plain_jobs, free_jobs, t_jobs, lt_jobs, tsd_jobs):
         assert service.preflight(jobs, out) == []
 
     otp = _otp()
@@ -87,9 +91,25 @@ def test_one_session_signs_timestamps_and_verifies_everything(real_wallet, tmp_p
     try:
         plain = service.sign_batch(api, account, password, None, service.fingerprint(plain_jobs), out_dir=out,
                                    signer_name=signer.name, session_id=session)
-        assert plain[0].ok, plain[0].error
+        assert all(r.ok for r in plain), [r.error for r in plain]
         a0 = verify.has_timestamp(Kind.PADES, plain[0].output.read_bytes())
         _say("A0 plain signature already timestamped (SelfCare automatic?)", a0)
+        raw = p7m.decode(plain[1].output.read_bytes())
+        _say("Aruba's .p7m encoding", "BER, indefinite length" if raw[1:2] == b"\x80" else "DER (definite length)")
+        if FREE:  # the free Belgian timestamp on real Aruba output: document timestamp on the PDF, CAdES-T
+            freed = service.sign_batch(api, account, password, None, service.fingerprint(free_jobs), out_dir=out,
+                                       signer_name=signer.name, session_id=session,
+                                       free=timestamping.FreeTimestamps(trust_factory=lambda: trust))
+            for result in freed:
+                _say(f"free {result.job.src.name}", "timestamped" if result.ok and result.timestamped
+                     else f"NOT timestamped: {result.warning or result.error}")
+            assert all(r.ok and r.timestamped for r in freed), "free timestamp not applied: see the messages above"
+            for result in freed:
+                report = verify.verify_file(result.output, trust)
+                stamp = report.timestamps[-1] if result.job.kind is Kind.PADES else report.checks[0].timestamp
+                _say(f"free {result.output.name}", f"verdict={report.verdict} covers={report.checks[0].covers_document} "
+                                                   f"ts={stamp}")
+                assert report.ok and report.checks[0].covers_document and stamp.trusted and stamp.qualified is True
         if not TIMESTAMPS:
             return
         marked = service.sign_batch(api, account, password, None, service.fingerprint(t_jobs), out_dir=out,
