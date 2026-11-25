@@ -19,7 +19,8 @@ import datetime as dt
 from .. import config, credentials, diagnostics, files, messages, profiles, service, verify
 from ..errors import CredentialsError, FileError, FirmaError, OriginalRequired, TimestampError
 from ..logsetup import log_path, register_paths
-from ..models import LAST_PAGE, JobResult, Kind, Position, SignJob, StampSpec, TimestampType, VerifyReport
+from ..models import (LAST_PAGE, JobResult, Kind, Position, SignJob, StampSpec, TimestampSource, TimestampType,
+                      VerifyReport)
 from . import worker
 from .dialogs import (
     TSR_NOTE, LoginDialog, OtpDialog, ProfileEditDialog, ProfilesDialog, TextDialog, TimestampFormatDialog,
@@ -649,7 +650,7 @@ class MainWindow(QMainWindow):
             self.prepare_sign(paths, Kind.CADES)
 
     def timestamp_default(self) -> bool:
-        return self.current.timestamp if self.current else False
+        return self.current is not None and self.current.timestamp is TimestampSource.ARUBA
 
     def prepare_sign(self, paths: list[str], kind: Kind, note: str = "", timestamp: bool | None = None) -> None:
         self.paths = [Path(p) for p in paths]

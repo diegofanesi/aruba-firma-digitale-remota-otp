@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 
 from .. import credentials, profiles, service
 from ..errors import FirmaError
-from ..models import TsaCredentials
+from ..models import TimestampSource, TsaCredentials
 from . import worker
 
 TSR_NOTE = ("Con il formato TSR la marca è un file separato: se la mandi a qualcuno, manda anche il documento "
@@ -168,7 +168,7 @@ class ProfileEditDialog(QDialog):
         group = QGroupBox("Marca temporale")
         box = QVBoxLayout(group)
         self.timestamp = QCheckBox("Marca sempre i file firmati (data certa)")
-        self.timestamp.setChecked(profile.timestamp if profile else False)
+        self.timestamp.setChecked(profile is not None and profile.timestamp is TimestampSource.ARUBA)
         box.addWidget(self.timestamp)
         box.addWidget(_label("Serve un servizio che includa le marche (Firma Remota con marcatura illimitata, con "
                              "«Marca automaticamente» attiva nel SelfCare) oppure un account di marca temporale.",
@@ -236,7 +236,7 @@ class ProfileEditDialog(QDialog):
             return
         try:
             profile = profiles.new_profile(alias, user, domain, id=self.editing.id if self.editing else None,
-                                           timestamp=self.timestamp.isChecked())
+                                           timestamp=TimestampSource.ARUBA if self.timestamp.isChecked() else TimestampSource.NONE)
             clash = profiles.find(self.existing, alias)
             if clash is not None and clash.id != profile.id:
                 raise FirmaError(f"C'è già un account chiamato «{clash.alias}»: scegli un altro nome.")
@@ -322,7 +322,7 @@ class ProfilesDialog(QDialog):
         self.list.clear()
         for profile in self.profiles:
             saved = "" if profiles.password(self.store, profile) else "  (password non salvata)"
-            mark = "  (con marca temporale)" if profile.timestamp else ""
+            mark = "  (con marca temporale)" if profile.timestamp is not TimestampSource.NONE else ""
             self.list.addItem(f"{profile.alias}  —  {profile.login}{saved}{mark}")
         if self.profiles:
             self.list.setCurrentRow(self.profiles.index(select) if select in self.profiles else 0)

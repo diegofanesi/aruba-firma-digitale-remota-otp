@@ -13,7 +13,8 @@ from pathlib import Path
 
 from . import __version__, config, credentials, diagnostics, files, logsetup, messages, p7m, profiles, service, tst, verify
 from .errors import CredentialsError, FirmaError, OtpError, TimestampError
-from .models import LAST_PAGE, Kind, Position, SignerInfo, SignJob, StampSpec, TimestampType, TsaCredentials
+from .models import (LAST_PAGE, Kind, Position, SignerInfo, SignJob, StampSpec, TimestampSource, TimestampType,
+                     TsaCredentials)
 
 log = logging.getLogger("firmaremota.cli")
 
@@ -103,7 +104,7 @@ def _timestamp_wanted(args: argparse.Namespace, profile: profiles.Profile | None
     wanted = getattr(args, "marca", None)
     if wanted is not None:
         return wanted
-    return profile.timestamp if profile is not None else False
+    return profile is not None and profile.timestamp is TimestampSource.ARUBA
 
 
 def _remember_profile(settings: config.Settings, profile: profiles.Profile | None) -> None:
@@ -298,7 +299,7 @@ def _needs_profile(args: argparse.Namespace) -> bool:
 
 
 def _timestamp_label(store, profile: profiles.Profile) -> str:
-    if not profile.timestamp:
+    if profile.timestamp is TimestampSource.NONE:
         return "marca temporale: no"
     return "marca temporale: sì (" + ("account TSA" if store.get(profile.tsa_key) else "richiesta ad Aruba") + ")"
 
@@ -338,7 +339,8 @@ def cmd_configura(args: argparse.Namespace) -> int:
             print(f"Password di «{profile.alias}» rimossa: verrà chiesta a ogni firma.")
         elif args.marca is not None:
             wanted = args.marca == "si"
-            profiles.upsert(store, available, dataclasses.replace(profile, timestamp=wanted))
+            source = TimestampSource.ARUBA if wanted else TimestampSource.NONE
+            profiles.upsert(store, available, dataclasses.replace(profile, timestamp=source))
             print(f"Marca temporale per «{profile.alias}»: {'attiva' if wanted else 'disattivata'}"
                   + (" (le firme avranno una marca temporale)." if wanted else " (firme senza marca)."))
         else:
@@ -385,7 +387,7 @@ def cmd_configura(args: argparse.Namespace) -> int:
     print("Controllo le credenziali con Aruba (non serve il codice OTP)...")
     _, signer = service.prepare_account(api, user, domain, password)
     profile = profiles.new_profile(alias, user, domain, id=editing.id if editing else None,
-                                   timestamp=editing.timestamp if editing else False)
+                                   timestamp=editing.timestamp if editing else TimestampSource.NONE)
     profiles.upsert(store, available, profile)
     if remember:
         profiles.set_password(store, profile, password)
@@ -400,7 +402,7 @@ def cmd_configura(args: argparse.Namespace) -> int:
         print(f"Nome utente e password sono in {store.name}; sul disco non viene salvato nient'altro.")
     else:
         print(f"Nome utente in {store.name}; la password verrà chiesta a ogni firma.")
-    if profile.timestamp:
+    if profile.timestamp is not TimestampSource.NONE:
         print("Marca temporale: attiva (le firme avranno data certa; per disattivarla: aruba-firma configura --marca no).")
     else:
         print("Marca temporale: non attiva. Serve un servizio che la includa (Firma Remota con marcatura illimitata) o un "

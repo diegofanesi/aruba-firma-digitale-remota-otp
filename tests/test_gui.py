@@ -17,7 +17,7 @@ from firmaremota.arss.client import MSG_OTP  # noqa: E402
 from firmaremota.errors import CredentialsError, OtpError, ServiceError  # noqa: E402
 from firmaremota.gui.dialogs import OtpDialog, ProfileEditDialog, ProfilesDialog  # noqa: E402
 from firmaremota.gui.main_window import MainWindow  # noqa: E402
-from firmaremota.models import Kind, Position  # noqa: E402
+from firmaremota.models import Kind, Position, TimestampSource  # noqa: E402
 
 from .conftest import PASSWORD, PROFILE_ID, add_profile  # noqa: E402
 from .fakes import FakeArss, signer_info  # noqa: E402
@@ -551,10 +551,10 @@ def test_options_timestamp_preset_from_profile(window, api, qtbot, store, tmp_pa
     import dataclasses
 
     from firmaremota import profiles
-    from firmaremota.models import TimestampType
+    from firmaremota.models import TimestampSource, TimestampType
 
     (profile,) = profiles.load_all(store)
-    profiles.upsert(store, [profile], dataclasses.replace(profile, timestamp=True))  # "Marca sempre" on
+    profiles.upsert(store, [profile], dataclasses.replace(profile, timestamp=TimestampSource.ARUBA))
     window.current = profiles.load_all(store)[0]
     window.choose_files = Recorder(pdfs(tmp_path, make_pdf, "a.pdf"))
     window.home.sign_pdf.click()
@@ -671,7 +671,7 @@ def test_profile_dialog_timestamp_settings(qtbot, store, api):
     dialog.check.click()
     qtbot.waitUntil(lambda: dialog.result() == QDialog.DialogCode.Accepted, timeout=10000)
     saved = profiles.load_all(store)[0]
-    assert saved.timestamp is True and profiles.tsa_account(store, saved) == TsaCredentials("tsa-user", "tsa-pw")
+    assert saved.timestamp is TimestampSource.ARUBA and profiles.tsa_account(store, saved) == TsaCredentials("tsa-user", "tsa-pw")
     again = ProfileEditDialog(None, lambda: api, store, [saved], saved)
     qtbot.addWidget(again)
     assert again.tsa_separate.isChecked() and again.tsa_user.text() == "tsa-user" and again.tsa_password.text() == ""

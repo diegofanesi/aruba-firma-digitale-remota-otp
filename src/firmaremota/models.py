@@ -29,6 +29,16 @@ class TimestampType(StrEnum):
     TSD = "TSD"  # CAdES only: the signed .p7m wrapped in a .tsd envelope
 
 
+class TimestampSource(StrEnum):
+    """Who puts the timestamp on a signature: an account setting, overridable for one signing.
+
+    A StrEnum member is always truthy: compare with NONE, never use it as a bool."""
+
+    NONE = "no"
+    ARUBA = "aruba"  # Aruba itself: requiredmark (+ a TSA account if saved), levels T/LT/TSD
+    BELGIUM = "belgio"  # the free qualified time-stamping service of the Belgian federal government, added here
+
+
 class Position(StrEnum):
     BOTTOM_RIGHT = "basso-destra"
     BOTTOM_LEFT = "basso-sinistra"
@@ -103,6 +113,7 @@ class JobResult:
     output: Path | None = None
     error: FirmaError | None = None
     timestamped: bool = False  # the saved file carries a timestamp (asked for, or applied by Aruba on its own)
+    warning: str | None = None  # saved, but not quite as asked (the free timestamp couldn't be added)
 
     @property
     def ok(self) -> bool:

@@ -330,10 +330,10 @@ def test_timestamp_off_by_default_and_flags(api, configured, tmp_path, make_pdf,
 
 def test_profile_setting_on_and_senza_marca_flag(api, configured, tmp_path, make_pdf, monkeypatch):
     from firmaremota import profiles
-    from firmaremota.models import TimestampType
+    from firmaremota.models import TimestampSource, TimestampType
 
     (profile,) = profiles.load_all(configured)
-    profiles.upsert(configured, [profile], dataclasses.replace(profile, timestamp=True))  # "Marca sempre" on
+    profiles.upsert(configured, [profile], dataclasses.replace(profile, timestamp=TimestampSource.ARUBA))
     (tmp_path / "a.pdf").write_bytes(make_pdf(A4))
     answers(monkeypatch, "12345678")
     assert cli.main(["pdf", str(tmp_path / "a.pdf")]) == 0 and api.tsa_seen[-1][1] == TimestampType.T

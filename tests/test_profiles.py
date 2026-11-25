@@ -6,6 +6,7 @@ import pytest
 
 from firmaremota import credentials, logsetup, profiles
 from firmaremota.errors import CredentialsError
+from firmaremota.models import TimestampSource
 
 from .conftest import MemoryStore
 
@@ -97,13 +98,49 @@ def test_loading_registers_personal_values_for_the_log():
     assert logsetup.redact("Papà firma come mario.rossi@firma") == "P**à firma come m" + "*" * 15 + "a"
 
 
-def test_timestamp_flag_roundtrip_and_default():
+def test_timestamp_source_roundtrip_and_default():
     store = MemoryStore()
-    saved = profiles.upsert(store, [], profiles.new_profile("Mario", "mario.rossi", "firma", timestamp=True))
+    saved = profiles.upsert(store, [], profiles.new_profile("Mario", "mario.rossi", "firma",
+                                                            timestamp=TimestampSource.BELGIUM))
     saved = profiles.upsert(store, saved, profiles.new_profile("Anna", "anna", "firma"))
-    assert [p.timestamp for p in profiles.load_all(store)] == [True, False]
-    store.data[profiles.INDEX_KEY] = json.dumps([{"id": "a1", "alias": "Vecchio", "login": "x@firma"}])  # older layout
-    assert profiles.load_all(store)[0].timestamp is False
+    saved = profiles.upsert(store, saved, profiles.new_profile("Ugo", "ugo", "firma", timestamp=TimestampSource.ARUBA))
+    assert [p.timestamp for p in profiles.load_all(store)] == [
+        TimestampSource.BELGIUM, TimestampSource.NONE, TimestampSource.ARUBA]
+    assert [item["marca"] for item in json.loads(store.data[profiles.INDEX_KEY])] == ["belgio", "no", "aruba"]
+
+
+@pytest.mark.parametrize("stored, expected", [
+    (True, TimestampSource.ARUBA),  # older versions: "Marca sempre" on meant Aruba
+    (False, TimestampSource.NONE),
+    (None, TimestampSource.NONE),
+    ("belgio", TimestampSource.BELGIUM),
+    ("qualcosa", TimestampSource.NONE),  # unknown (a newer version?): no timestamp rather than a guess
+    (7, TimestampSource.NONE),
+])
+def test_timestamp_source_from_older_and_odd_values(stored, expected):
+    store = MemoryStore()
+    item = {"id": "a1", "alias": "Vecchio", "login": "x@firma"}
+    if stored is not None:
+        item["marca"] = stored
+    store.data[profiles.INDEX_KEY] = json.dumps([item])
+    assert profiles.load_all(store)[0].timestamp is expected
+
+
+def test_timestamp_source_is_never_used_as_a_bool():
+    """A StrEnum member is truthy, "no" included: every check must compare with the members."""
+    import re
+    from pathlib import Path
+
+    import firmaremota
+
+    root = Path(firmaremota.__file__).parent
+    offenders = []
+    for path in root.rglob("*.py"):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if re.search(r"(if|and|or|not)\s+[\w.]*\.timestamp\b(?!\s*(is|==|!=|in)\b)(?![\w(\[])", line) \
+                    and "profile" in line:
+                offenders.append(f"{path.name}:{number}: {line.strip()}")
+    assert offenders == []
 
 
 def test_tsa_account_fallback_and_saved():

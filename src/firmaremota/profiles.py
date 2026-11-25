@@ -4,7 +4,8 @@ Everything lives in the wallet; nothing is written to disk. Entry names are fixe
 never personal:
 
     profili         JSON list of {"id", "alias", "login", "marca"} (the value is what the wallet encrypts);
-                    "marca" (default false) = sign with a timestamp, ArubaSign's "Marca sempre i file firmati"
+                    "marca" = who timestamps the signatures: "no" (default), "aruba", "belgio" (the free
+                    Belgian service); older versions stored true/false (true = Aruba)
     password:<id>   the password of that profile; absent when the user chose not to remember it
     marca:<id>      JSON {"user", "password", "url"} of a separate time-stamping (TSA) account; absent
                     when the signing credentials themselves are used for timestamps
@@ -16,13 +17,16 @@ profile the first time the list is read.
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from dataclasses import dataclass
 
 from .credentials import LOGIN_KEY, PASSWORD_KEY, CredentialStoreError, Store, split_login
 from .errors import CredentialsError
 from .logsetup import register_personal, register_secret
-from .models import TsaCredentials
+from .models import TimestampSource, TsaCredentials
+
+log = logging.getLogger("firmaremota.profiles")
 
 INDEX_KEY = "profili"
 
@@ -33,7 +37,7 @@ class Profile:
     alias: str
     user: str
     domain: str
-    timestamp: bool = False  # "Marca sempre i file firmati": off until the user turns it on (as in ArubaSign)
+    timestamp: TimestampSource = TimestampSource.NONE  # off until the user turns it on (as in ArubaSign)
 
     @property
     def login(self) -> str:
@@ -48,7 +52,8 @@ class Profile:
         return f"marca:{self.id}"
 
 
-def new_profile(alias: str, user: str, domain: str, id: str | None = None, timestamp: bool = False) -> Profile:
+def new_profile(alias: str, user: str, domain: str, id: str | None = None,
+                timestamp: TimestampSource = TimestampSource.NONE) -> Profile:
     if "@" in user:  # "utente@dominio" typed as the username, the way Aruba's selfcare shows it
         user, domain = split_login(user)
     alias, user, domain = alias.strip(), user.strip(), domain.strip() or "firma"
@@ -56,11 +61,24 @@ def new_profile(alias: str, user: str, domain: str, id: str | None = None, times
         raise CredentialsError("Dai un nome all'account (per esempio il nome di chi firma).")
     if not user:
         raise CredentialsError("Serve il nome utente Aruba.")
-    return Profile(id or secrets.token_hex(8), alias, user, domain, timestamp)
+    return Profile(id or secrets.token_hex(8), alias, user, domain, TimestampSource(timestamp))
 
 
 def _register(profile: Profile) -> None:
     register_personal(profile.alias, profile.login, profile.user)
+
+
+def timestamp_source(raw) -> TimestampSource:
+    """The stored "marca" value: true/false from older versions (true was Aruba), or a source name."""
+    if raw is True:
+        return TimestampSource.ARUBA
+    if raw is None or raw is False:
+        return TimestampSource.NONE
+    try:
+        return TimestampSource(raw)
+    except ValueError:
+        log.warning("impostazione della marca temporale non riconosciuta: nessuna marca")
+        return TimestampSource.NONE
 
 
 def load_all(store: Store) -> list[Profile]:
@@ -71,7 +89,8 @@ def load_all(store: Store) -> list[Profile]:
         profiles = []
         for item in json.loads(raw):
             user, domain = split_login(item["login"])
-            profiles.append(Profile(str(item["id"]), str(item["alias"]), user, domain, bool(item.get("marca", False))))
+            profiles.append(Profile(str(item["id"]), str(item["alias"]), user, domain,
+                                    timestamp_source(item.get("marca"))))
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise CredentialStoreError("L'elenco degli account nel portachiavi è danneggiato.", detail=str(exc)) from None
     for profile in profiles:
@@ -80,7 +99,7 @@ def load_all(store: Store) -> list[Profile]:
 
 
 def save_all(store: Store, profiles: list[Profile]) -> None:
-    store.set(INDEX_KEY, json.dumps([{"id": p.id, "alias": p.alias, "login": p.login, "marca": p.timestamp}
+    store.set(INDEX_KEY, json.dumps([{"id": p.id, "alias": p.alias, "login": p.login, "marca": p.timestamp.value}
                                      for p in profiles]))
 
 

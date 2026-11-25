@@ -4,6 +4,7 @@ import pytest
 
 from firmaremota import cli, config, credentials, diagnostics, profiles
 from firmaremota.errors import CredentialsError, NetworkError
+from firmaremota.models import TimestampSource
 
 from .conftest import PASSWORD, MemoryStore, add_profile
 from .fakes import FakeArss, signer_info
@@ -207,11 +208,11 @@ def test_configura_marca_options(env, capsys):
     assert cli.main(["configura", "--elenco"]) == 0
     assert "marca temporale: no" in capsys.readouterr().out  # off by default
     assert cli.main(["configura", "--marca", "si"]) == 0
-    assert profiles.load_all(env.store)[0].timestamp is True and "attiva" in capsys.readouterr().out
+    assert profiles.load_all(env.store)[0].timestamp is TimestampSource.ARUBA and "attiva" in capsys.readouterr().out
     assert cli.main(["configura", "--elenco"]) == 0
     assert "marca temporale: sì (richiesta ad Aruba)" in capsys.readouterr().out
     assert cli.main(["configura", "--marca", "no"]) == 0
-    assert profiles.load_all(env.store)[0].timestamp is False and "disattivata" in capsys.readouterr().out
+    assert profiles.load_all(env.store)[0].timestamp is TimestampSource.NONE and "disattivata" in capsys.readouterr().out
     assert cli.main(["configura", "--marca", "si"]) == 0
     env.replies["input"] = ["", "https://tsa.example/ts"]  # Account TSA: keep the username; a server address
     env.replies["getpass"] = ["Pw-tsa"]
@@ -231,7 +232,7 @@ def test_configura_mentions_the_timestamp_default(env, capsys):
     env.replies["getpass"] = ["Pw-1", "Pw-1"]
     assert cli.main(["configura"]) == 0
     assert "Marca temporale: non attiva" in capsys.readouterr().out
-    assert profiles.load_all(env.store)[0].timestamp is False
+    assert profiles.load_all(env.store)[0].timestamp is TimestampSource.NONE
 
 
 @pytest.mark.parametrize("command", ["pdf", "p7m", "marca", "verifica", "estrai", "configura", "diagnostica", "gui"])

@@ -313,15 +313,18 @@ class MemoryStore:
 
 
 def add_profile(store, alias, login, password=None, id=None, timestamp=False):
-    """Put an account into a fake wallet the way the app lays it out; returns the Profile."""
+    """Put an account into a fake wallet the way the app lays it out; returns the Profile.
+
+    `timestamp`: a TimestampSource, or True for Aruba / False for none (the older layout)."""
     import json
 
     from firmaremota import credentials, profiles
 
     user, domain = credentials.split_login(login)
-    profile = profiles.Profile(id or f"{abs(hash(alias)) % 10**16:016x}", alias, user, domain, timestamp)
+    source = profiles.timestamp_source(timestamp)
+    profile = profiles.Profile(id or f"{abs(hash(alias)) % 10**16:016x}", alias, user, domain, source)
     index = json.loads(store.data.get(profiles.INDEX_KEY, "[]"))
-    index.append({"id": profile.id, "alias": profile.alias, "login": profile.login, "marca": timestamp})
+    index.append({"id": profile.id, "alias": profile.alias, "login": profile.login, "marca": source.value})
     store.data[profiles.INDEX_KEY] = json.dumps(index)
     if password is not None:
         store.data[profile.password_key] = password
