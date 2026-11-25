@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 import datetime as dt
 
-from .. import config, credentials, diagnostics, files, messages, profiles, service, verify
+from .. import config, credentials, diagnostics, files, messages, profiles, service, timestamping, verify
 from ..errors import CredentialsError, FileError, FirmaError, OriginalRequired, TimestampError
 from ..logsetup import log_path, register_paths
 from ..models import (LAST_PAGE, JobResult, Kind, Position, SignJob, StampSpec, TimestampSource, TimestampType,
@@ -157,6 +157,12 @@ class HomePage(QWidget):
         self.bar.refresh(available, current)
 
 
+SOURCES = {  # the options page's choice, preset from the account
+    TimestampSource.NONE: "Nessuna",
+    TimestampSource.ARUBA: "Di Aruba",
+    TimestampSource.BELGIUM: "Gratuita (servizio pubblico belga)",
+}
+
 LEVELS = {  # ArubaSign's "Tipo di marcatura"
     TimestampType.T: "T — marca nella firma (consigliato)",
     TimestampType.LT: "LT — marca con i dati di revoca, per conservare a lungo",
@@ -184,17 +190,25 @@ class OptionsPage(QWidget):
         self.note.setStyleSheet(WARN_STYLE)
         self.note.setVisible(False)
         layout.addWidget(self.note)
-        self.timestamp = QCheckBox("Marca temporale (data certa alla firma)")
-        self.timestamp.setObjectName("bigcheck")
-        layout.addWidget(self.timestamp)
-        level_row = QHBoxLayout()
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("Marca temporale (data certa):"))
+        self.source = QComboBox()
+        for source, text in SOURCES.items():
+            self.source.addItem(text, source.value)
+        source_row.addWidget(self.source, 1)
+        layout.addLayout(source_row)
+        self.level_row = QWidget()
+        level_row = QHBoxLayout(self.level_row)
+        level_row.setContentsMargins(0, 0, 0, 0)
         self.level_label = QLabel("Tipo di marcatura:")
         self.level = QComboBox()
         level_row.addWidget(self.level_label)
         level_row.addWidget(self.level, 1)
-        layout.addLayout(level_row)
-        self.timestamp.toggled.connect(self.level.setEnabled)
-        self.timestamp.toggled.connect(self.level_label.setEnabled)
+        layout.addWidget(self.level_row)
+        self.free_note = _label("Gratuita, dal servizio pubblico belga (qualificata; solo uso non commerciale). Se "
+                                "non risponde, il documento viene firmato senza marca e te lo segnaliamo.", "hint")
+        layout.addWidget(self.free_note)
+        self.source.currentIndexChanged.connect(lambda _: self._source_changed())
         self.stamp = QCheckBox("Aggiungi un timbro visibile con la firma")
         self.stamp.setObjectName("bigcheck")
         layout.addWidget(self.stamp)
@@ -240,8 +254,13 @@ class OptionsPage(QWidget):
         row.addWidget(self.sign)
         layout.addLayout(row)
 
-    def load(self, settings: config.Settings, paths: list[Path], kind: Kind = Kind.PADES, timestamp: bool = True,
-             note: str = "") -> None:
+    def _source_changed(self) -> None:
+        source = self.timestamp_source()
+        self.level_row.setVisible(source is TimestampSource.ARUBA)  # levels exist only for Aruba's marks
+        self.free_note.setVisible(source is TimestampSource.BELGIUM)
+
+    def load(self, settings: config.Settings, paths: list[Path], kind: Kind = Kind.PADES,
+             timestamp: TimestampSource = TimestampSource.NONE, note: str = "") -> None:
         self.kind = kind
         what = "PDF" if kind is Kind.PADES else "file (.p7m)"
         self.title.setText(f"Firma un {what}" if len(paths) == 1 else f"Firma {len(paths)} {what}")
@@ -249,13 +268,12 @@ class OptionsPage(QWidget):
         self.files.addItems([p.name for p in paths])
         self.note.setText(note)
         self.note.setVisible(bool(note))
-        self.timestamp.setChecked(timestamp)
         self.level.clear()
         for level, text in LEVELS.items():
             if level is not TimestampType.TSD or kind is Kind.CADES:
                 self.level.addItem(text, level.value)
-        self.level.setEnabled(timestamp)
-        self.level_label.setEnabled(timestamp)
+        self.source.setCurrentIndex(self.source.findData(TimestampSource(timestamp).value))
+        self._source_changed()
         self.stamp.setVisible(kind is Kind.PADES)
         self.where.setVisible(kind is Kind.PADES)
         self.stamp.setChecked(settings.stamp == "si")
@@ -287,8 +305,14 @@ class OptionsPage(QWidget):
             return None
         return StampSpec(page=self._page(), position=self._position(), text=self.text.text().strip())
 
+    def timestamp_source(self) -> TimestampSource:
+        return TimestampSource(self.source.currentData())
+
     def timestamp_level(self) -> TimestampType | None:
-        return TimestampType(self.level.currentData()) if self.timestamp.isChecked() else None
+        """Aruba's level (T, LT, TSD); None without Aruba's mark (the free one is always T, done here)."""
+        if self.timestamp_source() is not TimestampSource.ARUBA:
+            return None
+        return TimestampType(self.level.currentData())
 
     def save_to(self, settings: config.Settings) -> None:
         if self.kind is not Kind.PADES:
@@ -385,8 +409,11 @@ class ResultPage(QWidget):
             self.title.setStyleSheet(BAD_STYLE)
         self.lines.clear()
         for r in results:
-            self.lines.addItem(f"✔  {r.job.src.name}  →  {r.output.name}" if r.ok
-                               else f"✘  {r.job.src.name}: {r.error.message}")
+            if r.ok:
+                self.lines.addItem(f"✔  {r.job.src.name}  →  {r.output.name}"
+                                   + ("  (senza marca temporale)" if r.warning else ""))
+            else:
+                self.lines.addItem(f"✘  {r.job.src.name}: {r.error.message}")
         self.open_document.setVisible(len(signed) == 1)
         self.open_folder.setVisible(bool(signed))
         self.retry.setVisible(bool(retryable(results)))
@@ -485,6 +512,8 @@ class MainWindow(QMainWindow):
         self.pending: dict | None = None  # a signing run between the account check and the OTP
         self.mode = "sign"  # what the result page is about: "sign" or "timestamp"
         self.last_level: TimestampType | None = None
+        self.last_source = TimestampSource.NONE
+        self.free_tsa_factory = timestamping.FreeTimestamps  # () -> FreeTimestamps; tests swap it
         self.verify_fn = verify.verify_file_isolated  # (path, cancel) -> VerifyReport; tests swap it
         self.preflight_fn = _isolated_preflight  # (jobs, level) -> problems; tests swap it
         self.store: credentials.Store | None = None
@@ -649,10 +678,11 @@ class MainWindow(QMainWindow):
         if paths:
             self.prepare_sign(paths, Kind.CADES)
 
-    def timestamp_default(self) -> bool:
-        return self.current is not None and self.current.timestamp is TimestampSource.ARUBA
+    def timestamp_default(self) -> TimestampSource:
+        return self.current.timestamp if self.current is not None else TimestampSource.NONE
 
-    def prepare_sign(self, paths: list[str], kind: Kind, note: str = "", timestamp: bool | None = None) -> None:
+    def prepare_sign(self, paths: list[str], kind: Kind, note: str = "",
+                     timestamp: TimestampSource | None = None) -> None:
         self.paths = [Path(p) for p in paths]
         wanted = self.timestamp_default() if timestamp is None else timestamp
         self.options.load(config.load(), self.paths, kind, wanted, note)
@@ -663,7 +693,8 @@ class MainWindow(QMainWindow):
         self.options.save_to(settings)
         config.save(settings)
         kind, spec = self.options.kind, self.options.stamp_spec()
-        self.sign([SignJob(p, kind, spec) for p in self.paths], level=self.options.timestamp_level())
+        self.sign([SignJob(p, kind, spec) for p in self.paths], level=self.options.timestamp_level(),
+                  source=self.options.timestamp_source())
 
     def retry_remaining(self) -> None:
         jobs = retryable(self.results)
@@ -673,10 +704,10 @@ class MainWindow(QMainWindow):
             self.timestamp([str(j.src) for j in jobs], jobs[0].kind)
         elif any(isinstance(r.error, TimestampError) for r in self.results):
             # the timestamp is what failed: offer the same files with the box unticked
-            self.prepare_sign([str(j.src) for j in jobs], jobs[0].kind, timestamp=False,
+            self.prepare_sign([str(j.src) for j in jobs], jobs[0].kind, timestamp=TimestampSource.NONE,
                               note="La marca temporale non è stata applicata: puoi firmare senza, o riprovare.")
         else:
-            self.sign(jobs, level=self.last_level)
+            self.sign(jobs, level=self.last_level, source=self.last_source)
 
     def credentials_for_signing(self):
         """(user, domain, password, remember, profile): from the wallet, asking only for what's missing."""
@@ -711,10 +742,13 @@ class MainWindow(QMainWindow):
         return self.ask_yes_no("Attenzione", f"L'ultimo accesso al servizio di firma è stato rifiutato ({failures} di "
                                "fila). Un altro errore potrebbe bloccare l'account Aruba.\n\nRiprovare comunque?")
 
-    def sign(self, jobs: list[SignJob], level: TimestampType | None = None) -> None:
+    def sign(self, jobs: list[SignJob], level: TimestampType | None = None,
+             source: TimestampSource | None = None) -> None:
         """Local checks (in a separate process), then the account check with Aruba (no OTP), then the OTP,
-        then signing."""
-        self.mode, self.last_level = "sign", level
+        then signing. `source`: who timestamps (default: Aruba when a `level` is given, else nobody)."""
+        if source is None:
+            source = TimestampSource.ARUBA if level is not None else TimestampSource.NONE
+        self.mode, self.last_level, self.last_source = "sign", level, source
         self.progress.start("Controllo dei file...", total=None, cancellable=False)
         self.stack.setCurrentWidget(self.progress)
         job = worker.Worker(self.preflight_fn, jobs, level=level)
@@ -767,10 +801,11 @@ class MainWindow(QMainWindow):
         self.cancel_event = threading.Event()
         level = pending["level"]
         tsa = profiles.tsa_credentials(self.store, pending["profile"]) if level else None
-        self.progress.start("Firma in corso..." + (" con marca temporale" if level else ""), total=len(jobs),
+        free = self.free_tsa_factory() if self.last_source is TimestampSource.BELGIUM and not level else None
+        self.progress.start("Firma in corso..." + (" con marca temporale" if level or free else ""), total=len(jobs),
                             cancellable=len(jobs) > 1)
         job = worker.Worker(service.sign_batch, self.api, account, pending["password"], otp, jobs,
-                            signer_name=signer.name, cancel=self.cancel_event, tsa=tsa, level=level)
+                            signer_name=signer.name, cancel=self.cancel_event, tsa=tsa, level=level, free=free)
         job.kwargs["progress"] = job.report
         worker.start(self, job, self.sign_done, self.sign_failed, self.progress.update_progress)
 
@@ -778,6 +813,9 @@ class MainWindow(QMainWindow):
         self.results = results
         self.result.show_results(results)
         self.stack.setCurrentWidget(self.result)
+        unstamped = sum(1 for r in results if r.ok and r.warning)
+        if unstamped:  # the signatures are there and valid; say plainly that the timestamp is missing
+            self.show_error("Firmato senza marca temporale", messages.no_free_timestamp(unstamped))
 
     # --- standalone timestamps --------------------------------------------------------------------
 

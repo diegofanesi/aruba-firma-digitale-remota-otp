@@ -8,8 +8,8 @@ import re
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLayout, QLineEdit,
-    QListWidget, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QVBoxLayout,
+    QButtonGroup, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLayout,
+    QLineEdit, QListWidget, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
 from .. import credentials, profiles, service
@@ -21,6 +21,19 @@ TSR_NOTE = ("Con il formato TSR la marca è un file separato: se la mandi a qual
             "originale, con lo stesso nome.")
 
 WARNING_STYLE = "color: #b3261e; font-weight: bold;"
+NOTE_STYLE = "color: #555;"
+
+# The account's "Marca temporale" setting: (radio text, explanation under it). The explanations break lines
+# by hand: word-wrapped labels inside a group box get clipped when the dialog sizes itself.
+TIMESTAMP_CHOICES = {
+    TimestampSource.NONE: ("Nessuna marca temporale", ""),
+    TimestampSource.ARUBA: ("Marca temporale di Aruba",
+                            "Serve la «Marca automatica» attiva nel SelfCare o un account TSA comprato a parte."),
+    TimestampSource.BELGIUM: ("Marca temporale gratuita (servizio pubblico belga)",
+                              "Qualificata, valida in tutta l'UE; solo per uso non commerciale. Se non risponde,\n"
+                              "il documento viene firmato lo stesso, senza marca, e te lo segnaliamo."),
+}
+ACCOUNT_MARKS = {TimestampSource.ARUBA: "  (marca di Aruba)", TimestampSource.BELGIUM: "  (marca gratuita)"}
 
 
 def _label(text: str, *, wrap: bool = True, style: str = "", rich: bool = False) -> QLabel:
@@ -164,20 +177,30 @@ class ProfileEditDialog(QDialog):
         self.remember = QCheckBox(f"Ricorda la password ({store.name})")
         self.remember.setChecked(self.has_saved_password if profile else True)
         layout.addWidget(self.remember)
-        # Timestamps, as in Aruba Sign's settings: "Marca sempre i file firmati" and the TSA account.
-        group = QGroupBox("Marca temporale")
+        # Timestamps: who puts one on every signature (ArubaSign's "Marca sempre i file firmati", plus the free
+        # Belgian service), and the separately bought TSA account.
+        group = QGroupBox("Marca temporale sulle firme (data certa)")
         box = QVBoxLayout(group)
-        self.timestamp = QCheckBox("Marca sempre i file firmati (data certa)")
-        self.timestamp.setChecked(profile is not None and profile.timestamp is TimestampSource.ARUBA)
-        box.addWidget(self.timestamp)
-        box.addWidget(_label("Serve un servizio che includa le marche (Firma Remota con marcatura illimitata, con "
-                             "«Marca automaticamente» attiva nel SelfCare) oppure un account di marca temporale.",
-                             style="color: #555;"))
+        self.timestamp_group = QButtonGroup(self)
+        self.timestamp_buttons: dict[TimestampSource, QRadioButton] = {}
+        current = profile.timestamp if profile else TimestampSource.NONE
+        for source, (text, note) in TIMESTAMP_CHOICES.items():
+            radio = QRadioButton(text)
+            radio.setChecked(source is current)
+            self.timestamp_group.addButton(radio)
+            self.timestamp_buttons[source] = radio
+            box.addWidget(radio)
+            if note:
+                explanation = _label(note, wrap=False, style=NOTE_STYLE)
+                explanation.setContentsMargins(28, 0, 0, 6)
+                box.addWidget(explanation)
         saved_tsa = profiles.tsa_account(store, profile) if profile else None
         self.tsa_separate = QCheckBox("Ho un account di marca temporale (TSA) comprato a parte")
         self.tsa_separate.setChecked(saved_tsa is not None)
         box.addWidget(self.tsa_separate)
-        tsa_form = QFormLayout()
+        self.tsa_fields = QWidget()  # shown only for a TSA account: most people have none, and the dialog must
+        tsa_form = QFormLayout(self.tsa_fields)  # fit a 1366x768 screen
+        tsa_form.setContentsMargins(0, 0, 0, 0)
         self.tsa_user = QLineEdit(saved_tsa.user if saved_tsa else "")
         self.tsa_password = QLineEdit()
         self.tsa_password.setEchoMode(QLineEdit.EchoMode.Password)
@@ -188,7 +211,9 @@ class ProfileEditDialog(QDialog):
         tsa_form.addRow("Account TSA:", self.tsa_user)
         tsa_form.addRow("Password TSA:", self.tsa_password)
         tsa_form.addRow("Indirizzo server:", self.tsa_url)
-        box.addLayout(tsa_form)
+        box.addWidget(self.tsa_fields)
+        self.tsa_fields.setVisible(self.tsa_separate.isChecked())
+        self.tsa_separate.toggled.connect(self.tsa_fields.setVisible)
         for field in (self.tsa_user, self.tsa_password, self.tsa_url):
             field.setEnabled(self.tsa_separate.isChecked())
             self.tsa_separate.toggled.connect(field.setEnabled)
@@ -218,7 +243,7 @@ class ProfileEditDialog(QDialog):
 
     def _set_busy(self, busy: bool, message: str = "", style: str = "") -> None:
         for widget in (self.alias, self.user, self.domain, self.password, self.remember, self.check, self.cancel,
-                       self.timestamp, self.tsa_separate):
+                       *self.timestamp_buttons.values(), self.tsa_separate):
             widget.setEnabled(not busy)
         for field in (self.tsa_user, self.tsa_password, self.tsa_url):
             field.setEnabled(not busy and self.tsa_separate.isChecked())
@@ -236,7 +261,7 @@ class ProfileEditDialog(QDialog):
             return
         try:
             profile = profiles.new_profile(alias, user, domain, id=self.editing.id if self.editing else None,
-                                           timestamp=TimestampSource.ARUBA if self.timestamp.isChecked() else TimestampSource.NONE)
+                                           timestamp=self.timestamp_choice())
             clash = profiles.find(self.existing, alias)
             if clash is not None and clash.id != profile.id:
                 raise FirmaError(f"C'è già un account chiamato «{clash.alias}»: scegli un altro nome.")
@@ -247,6 +272,9 @@ class ProfileEditDialog(QDialog):
         self._set_busy(True, "Controllo in corso con Aruba (non serve il codice OTP)...")
         job = worker.Worker(service.prepare_account, self.api_factory(), user, domain, password)
         worker.start(self, job, lambda result: self._checked(profile, password), self._failed)
+
+    def timestamp_choice(self) -> TimestampSource:
+        return next((s for s, radio in self.timestamp_buttons.items() if radio.isChecked()), TimestampSource.NONE)
 
     def _failed(self, exc: Exception) -> None:
         message = exc.message if isinstance(exc, FirmaError) else f"Errore imprevisto: {exc}"
@@ -322,7 +350,7 @@ class ProfilesDialog(QDialog):
         self.list.clear()
         for profile in self.profiles:
             saved = "" if profiles.password(self.store, profile) else "  (password non salvata)"
-            mark = "  (con marca temporale)" if profile.timestamp is not TimestampSource.NONE else ""
+            mark = ACCOUNT_MARKS.get(profile.timestamp, "")
             self.list.addItem(f"{profile.alias}  —  {profile.login}{saved}{mark}")
         if self.profiles:
             self.list.setCurrentRow(self.profiles.index(select) if select in self.profiles else 0)
