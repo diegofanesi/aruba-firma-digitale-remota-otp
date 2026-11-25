@@ -639,8 +639,8 @@ def test_profile_dialog_timestamp_settings(qtbot, store, api):
     assert profiles.tsa_account(store, profiles.load_all(store)[0]) is None
 
 
-def test_profiles_dialog_marks_accounts_without_timestamp(qtbot, store, api):
+def test_profiles_dialog_marks_accounts_with_timestamp(qtbot, store, api):
     add_profile(store, "Anna", "anna.bianchi@firma", "pw", timestamp=True)
     dialog = ProfilesDialog(None, lambda: api, store, profiles.load_all(store))
     qtbot.addWidget(dialog)
-    assert "(senza marca temporale)" in dialog.list.item(0).text() and "senza marca" not in dialog.list.item(1).text()
+    assert "marca temporale" not in dialog.list.item(0).text() and "(con marca temporale)" in dialog.list.item(1).text()

@@ -8,8 +8,8 @@ import re
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QVBoxLayout,
+    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLayout, QLineEdit,
+    QListWidget, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QVBoxLayout,
 )
 
 from .. import credentials, profiles, service
@@ -137,6 +137,7 @@ class ProfileEditDialog(QDialog):
         self.setWindowTitle("Modifica account" if profile else "Nuovo account")
         self.setMinimumWidth(720)
         layout = QVBoxLayout(self)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)  # wrapped hints never get clipped
         layout.addWidget(_label("Dati dell'account di firma remota Aruba."))
         form = QFormLayout()
         self.alias = QLineEdit(profile.alias if profile else "")
@@ -167,12 +168,11 @@ class ProfileEditDialog(QDialog):
         self.timestamp = QCheckBox("Marca sempre i file firmati (data certa)")
         self.timestamp.setChecked(profile.timestamp if profile else False)
         box.addWidget(self.timestamp)
-        box.addWidget(_label("Funziona se il servizio include la marcatura (Firma Remota con marcatura illimitata, "
-                             "con «Marca automaticamente» attiva nel SelfCare) oppure con un account di marca temporale.",
+        box.addWidget(_label("Serve un servizio che includa le marche (Firma Remota con marcatura illimitata, con "
+                             "«Marca automaticamente» attiva nel SelfCare) oppure un account di marca temporale.",
                              style="color: #555;"))
         saved_tsa = profiles.tsa_account(store, profile) if profile else None
-        self.tsa_separate = QCheckBox("Ho un account di marca temporale (TSA) comprato a parte: serve per marcare "
-                                      "file senza firmarli")
+        self.tsa_separate = QCheckBox("Ho un account di marca temporale (TSA) comprato a parte")
         self.tsa_separate.setChecked(saved_tsa is not None)
         box.addWidget(self.tsa_separate)
         tsa_form = QFormLayout()
@@ -320,7 +320,7 @@ class ProfilesDialog(QDialog):
         self.list.clear()
         for profile in self.profiles:
             saved = "" if profiles.password(self.store, profile) else "  (password non salvata)"
-            mark = "" if profile.timestamp else "  (senza marca temporale)"
+            mark = "  (con marca temporale)" if profile.timestamp else ""
             self.list.addItem(f"{profile.alias}  —  {profile.login}{saved}{mark}")
         if self.profiles:
             self.list.setCurrentRow(self.profiles.index(select) if select in self.profiles else 0)
@@ -410,15 +410,19 @@ class TimestampFormatDialog(QDialog):
     def __init__(self, parent, count: int):
         super().__init__(parent)
         self.setWindowTitle("Marca temporale")
-        self.setMinimumWidth(620)
+        self.setMinimumWidth(720)
         layout = QVBoxLayout(self)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)  # wrapped labels never get clipped
         what = "al file" if count == 1 else f"ai {count} file"
         layout.addWidget(_label(f"Dà data certa {what}, senza firmarli e senza codice OTP. In che formato?"))
-        self.tsd = QRadioButton("TSD (consigliato): un solo file, nome.estensione.tsd, con dentro documento e marca")
-        self.tsr = QRadioButton("TSR: solo la marca, nome.estensione.tsr, da tenere insieme al documento")
+        self.tsd = QRadioButton("TSD (consigliato)")
+        self.tsr = QRadioButton("TSR")
         self.tsd.setChecked(True)
-        layout.addWidget(self.tsd)
-        layout.addWidget(self.tsr)
+        for radio, text in ((self.tsd, "Un solo file, nome.estensione.tsd, con dentro il documento e la marca."),
+                            (self.tsr, "Solo la marca, nome.estensione.tsr, da tenere insieme al documento.")):
+            layout.addWidget(radio)
+            hint = _label(text, style="color: #555; margin-left: 28px;")
+            layout.addWidget(hint)
         self.note = _label(TSR_NOTE, style=WARNING_STYLE)
         self.note.setVisible(False)
         self.tsr.toggled.connect(self.note.setVisible)
