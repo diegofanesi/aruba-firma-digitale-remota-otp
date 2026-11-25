@@ -390,3 +390,69 @@ def test_marca_with_tsa_error(api, configured, tmp_path, monkeypatch, capsys):
     assert cli.main(["marca", str(tmp_path / "nota.txt")]) == 1
     assert "sono finite" in capsys.readouterr().err and not (tmp_path / "nota.txt.tsd").exists()
     assert config.load_state().auth_failures == 0
+
+
+@pytest.fixture
+def free_tsa(monkeypatch, timestamper, pki):
+    """The free timestamp service, faked (see test_timestamping), with no real waits between attempts."""
+    from firmaremota import timestamping, verify
+
+    from .test_timestamping import FakeTsa, QualifiedRoots
+
+    def install(failures=0):
+        fake = FakeTsa(timestamper, failures=failures)
+        monkeypatch.setattr(timestamping, "_post", fake)
+        monkeypatch.setattr(verify, "default_trust", lambda: QualifiedRoots(pki["ca"]))
+        monkeypatch.setattr(timestamping.FreeTimestamps, "_sleep", lambda self, seconds: True)
+        return fake
+
+    return install
+
+
+def test_free_timestamp_from_the_flag_and_from_the_account(api, configured, tmp_path, make_pdf, monkeypatch, capsys,
+                                                           free_tsa):
+    from firmaremota import profiles, verify
+    from firmaremota.models import Kind, TimestampSource
+
+    fake = free_tsa()
+    (tmp_path / "a.pdf").write_bytes(make_pdf(A4))
+    answers(monkeypatch, "12345678")
+    assert cli.main(["pdf", "--marca-gratuita", str(tmp_path / "a.pdf")]) == 0
+    assert api.tsa_seen == [(None, None)] and len(fake.requests) == 1  # Aruba signs plain; the mark is added here
+    assert verify.has_timestamp(Kind.PADES, (tmp_path / "a_firmato.pdf").read_bytes())
+    assert "— con marca temporale" in capsys.readouterr().out
+    (profile,) = profiles.load_all(configured)
+    profiles.upsert(configured, [profile], dataclasses.replace(profile, timestamp=TimestampSource.BELGIUM))
+    answers(monkeypatch, "12345678")
+    assert cli.main(["p7m", str(tmp_path / "a.pdf")]) == 0
+    assert verify.has_timestamp(Kind.CADES, (tmp_path / "a.pdf.p7m").read_bytes()) and len(fake.requests) == 2
+    answers(monkeypatch, "12345678")
+    assert cli.main(["p7m", "--senza-marca", str(tmp_path / "a.pdf")]) == 0 and len(fake.requests) == 2
+
+
+@pytest.mark.parametrize("args", [["--marca-gratuita", "--tipo-marca", "LT"], ["--tipo-marca", "TSD"]])
+def test_free_timestamp_has_only_level_t(api, configured, tmp_path, monkeypatch, capsys, free_tsa, args):
+    from firmaremota import profiles
+    from firmaremota.models import TimestampSource
+
+    (profile,) = profiles.load_all(configured)  # the second case: the account's setting is the free mark
+    profiles.upsert(configured, [profile], dataclasses.replace(profile, timestamp=TimestampSource.BELGIUM))
+    (tmp_path / "f.xml").write_bytes(b"<f/>")
+    assert cli.main(["p7m", *args, str(tmp_path / "f.xml")]) == 2
+    assert "solo il tipo T" in capsys.readouterr().err and api.calls == []
+
+
+def test_free_timestamp_down_signs_anyway_and_warns(api, configured, tmp_path, make_pdf, monkeypatch, capsys,
+                                                    free_tsa):
+    from firmaremota import verify
+    from firmaremota.models import Kind
+
+    fake = free_tsa(failures=99)
+    (tmp_path / "a.pdf").write_bytes(make_pdf(A4))
+    (tmp_path / "b.pdf").write_bytes(make_pdf(A4))
+    answers(monkeypatch, "12345678")
+    assert cli.main(["pdf", "--marca-gratuita", str(tmp_path / "a.pdf"), str(tmp_path / "b.pdf")]) == 0
+    out, err = capsys.readouterr()
+    assert out.count("SENZA marca temporale") == 2 and len(fake.requests) == 3
+    assert "Attenzione: Il servizio gratuito di marca temporale non ha risposto (3 tentativi): 2 documenti" in err
+    assert verify.signatures_intact(Kind.PADES, (tmp_path / "a_firmato.pdf").read_bytes())

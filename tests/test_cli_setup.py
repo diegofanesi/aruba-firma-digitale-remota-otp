@@ -207,13 +207,19 @@ def test_configura_marca_options(env, capsys):
     profile = add_profile(env.store, "Mario", "mario.rossi@firma", PASSWORD)
     assert cli.main(["configura", "--elenco"]) == 0
     assert "marca temporale: no" in capsys.readouterr().out  # off by default
-    assert cli.main(["configura", "--marca", "si"]) == 0
-    assert profiles.load_all(env.store)[0].timestamp is TimestampSource.ARUBA and "attiva" in capsys.readouterr().out
+    assert cli.main(["configura", "--marca", "aruba"]) == 0
+    assert profiles.load_all(env.store)[0].timestamp is TimestampSource.ARUBA and "Aruba" in capsys.readouterr().out
     assert cli.main(["configura", "--elenco"]) == 0
-    assert "marca temporale: sì (richiesta ad Aruba)" in capsys.readouterr().out
+    assert "marca temporale: Aruba)" in capsys.readouterr().out
+    assert cli.main(["configura", "--marca", "belgio"]) == 0
+    out = capsys.readouterr().out
+    assert profiles.load_all(env.store)[0].timestamp is TimestampSource.BELGIUM
+    assert "gratuita" in out and "non commerciale" in out and "senza marca e viene segnalato" in out
+    assert cli.main(["configura", "--elenco"]) == 0
+    assert "marca temporale: gratuita (servizio belga)" in capsys.readouterr().out
     assert cli.main(["configura", "--marca", "no"]) == 0
-    assert profiles.load_all(env.store)[0].timestamp is TimestampSource.NONE and "disattivata" in capsys.readouterr().out
-    assert cli.main(["configura", "--marca", "si"]) == 0
+    assert profiles.load_all(env.store)[0].timestamp is TimestampSource.NONE and "nessuna" in capsys.readouterr().out
+    assert cli.main(["configura", "--marca", "aruba"]) == 0
     env.replies["input"] = ["", "https://tsa.example/ts"]  # Account TSA: keep the username; a server address
     env.replies["getpass"] = ["Pw-tsa"]
     assert cli.main(["configura", "--credenziali-marca"]) == 0
@@ -221,7 +227,7 @@ def test_configura_marca_options(env, capsys):
     assert env.api.calls == []  # nothing is checked with Aruba: every attempt would spend a mark
     assert "consuma una marca" in capsys.readouterr().out
     assert cli.main(["configura", "--elenco"]) == 0
-    assert "marca temporale: sì (account TSA)" in capsys.readouterr().out
+    assert "marca temporale: Aruba (account TSA)" in capsys.readouterr().out
     assert cli.main(["configura", "--dimentica-credenziali-marca"]) == 0
     assert profiles.tsa_account(env.store, profile) is None
     assert cli.main(["configura", "--rimuovi"]) == 0 and set(env.store.data) <= {profiles.INDEX_KEY}  # tsa entry gone too
@@ -231,7 +237,8 @@ def test_configura_mentions_the_timestamp_default(env, capsys):
     env.replies["input"] = ["mario.rossi@firma", "", ""]
     env.replies["getpass"] = ["Pw-1", "Pw-1"]
     assert cli.main(["configura"]) == 0
-    assert "Marca temporale: non attiva" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Marca temporale: nessuna" in out and "configura --marca aruba|belgio|no" in out
     assert profiles.load_all(env.store)[0].timestamp is TimestampSource.NONE
 
 

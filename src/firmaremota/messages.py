@@ -157,3 +157,17 @@ def trust_list_line(report) -> str:
     if report.trust_list_stale:
         return prefix + f"Verifica fatta con l'elenco ufficiale dei certificatori del {when} (non è stato possibile aggiornarlo)."
     return prefix + f"Verifica fatta con l'elenco ufficiale dei certificatori (AgID) aggiornato al {when}."
+
+
+TIMESTAMP_SOURCES = {  # how each choice of the account setting is called, everywhere
+    "no": "nessuna marca temporale",
+    "aruba": "marca temporale di Aruba",
+    "belgio": "marca temporale gratuita (servizio pubblico belga, qualificato; solo uso non commerciale)",
+}
+
+
+def no_free_timestamp(count: int) -> str:
+    """After a signing where the free timestamp service failed: what happened, and that the signature holds."""
+    what = "il documento è stato firmato" if count == 1 else f"{count} documenti sono stati firmati"
+    return (f"Il servizio gratuito di marca temporale non ha risposto (3 tentativi): {what} senza marca "
+            "temporale. La firma digitale è valida comunque.")
