@@ -91,6 +91,10 @@ def preflight(jobs: list[SignJob], out_dir: Path | None = None, level: Timestamp
         if not job.src.is_file():
             problems.append(f"{name}: è una cartella, non un file.")
             continue
+        too_big = files.check_size(job.src, files.MAX_SIGN_SIZE)
+        if too_big:
+            problems.append(too_big)
+            continue
         try:
             data = job.src.read_bytes()
         except OSError as exc:
@@ -98,10 +102,6 @@ def preflight(jobs: list[SignJob], out_dir: Path | None = None, level: Timestamp
             continue
         if not data:
             problems.append(f"{name}: il file è vuoto.")
-            continue
-        too_big = files.check_size(job.src, files.MAX_SIGN_SIZE)
-        if too_big:
-            problems.append(too_big)
             continue
         if job.kind is Kind.PADES:
             try:

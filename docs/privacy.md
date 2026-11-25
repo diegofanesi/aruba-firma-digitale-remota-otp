@@ -64,5 +64,3 @@ verifies.
 ## Not covered
 - **Signed documents** contain the signer's certificate (name, tax code): that is what a digital
   signature is. They stay wherever the user saves them.
-- `scripts/spike_arss.py` (developer tool) writes raw exchanges and signed test files to
-  `spike-output/`; delete that folder after reading the results.

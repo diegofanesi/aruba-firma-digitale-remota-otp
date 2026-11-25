@@ -32,3 +32,4 @@ def test_desktop_file_types_are_declared():
     assert declared == {"application/timestamped-data": {"*.tsd", "*.TSD"}, "application/timestamp-reply": {"*.tsr", "*.TSR"}}
     assert claimed == {"application/pkcs7-mime", "application/pdf", *declared}  # pdf and p7m are standard types
     assert "aruba-firma-mime.xml" in (folder / "PKGBUILD").read_text()
+    assert "Exec=env PYTHONNOUSERSITE=1 aruba-firma-gui %F" in desktop  # user site-packages can't shadow the vendored libs

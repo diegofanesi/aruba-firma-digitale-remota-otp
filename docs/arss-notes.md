@@ -2,7 +2,8 @@
 
 Facts about Aruba Remote Signing Service that the client relies on. "Verified" means it was read
 from the bundled WSDL or observed against the live service; everything marked **TBD** is filled
-in from a `scripts/spike_arss.py` run (results land in `spike-output/<timestamp>/summary.json`,
+in from a `scripts/spike_arss.py` run (the script was removed on 2026-11-25 once it had served its purpose;
+it is in the git history before that date; results landed in `spike-output/<timestamp>/summary.json`,
 which is gitignored because it contains certificate data).
 
 ## Endpoint and WSDL (verified 2026-11-23)

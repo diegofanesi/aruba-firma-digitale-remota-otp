@@ -4,7 +4,7 @@ Version=1.5
 Name=Aruba Firma Digitale
 GenericName=Firma digitale
 Comment=Firma e verifica documenti con la firma remota Aruba
-Exec=aruba-firma-gui %F
+Exec=env PYTHONNOUSERSITE=1 aruba-firma-gui %F
 Icon=aruba-firma
 Terminal=false
 StartupNotify=true

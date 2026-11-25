@@ -38,6 +38,12 @@ if ! command -v pacman >/dev/null 2>&1; then
   echo "Questo script serve solo su Arch Linux (non trovo il comando pacman)." >&2
   exit 1
 fi
+for tool in fakeroot strip make; do  # the base-devel group: makepkg can't build without it
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "Manca «$tool»: installa prima gli strumenti di compilazione con  sudo pacman -S --needed base-devel" >&2
+    exit 1
+  fi
+done
 if [[ ! -d .git || ! -f pyproject.toml || ! -f packaging/arch/aruba-firma/PKGBUILD ]]; then
   echo "Esegui questo script dalla cartella del repository clonato con git (contiene .git e pyproject.toml)." >&2
   exit 1

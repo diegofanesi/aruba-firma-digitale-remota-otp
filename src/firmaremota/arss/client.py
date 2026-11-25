@@ -30,7 +30,8 @@ log = logging.getLogger("firmaremota.arss")
 
 WSDL = Path(__file__).with_name("ArubaSignService.wsdl")
 _NS = "{http://arubasignservice.arubapec.it/}"
-_SESSION_ID = re.compile(r"[0-9a-fA-F-]{16,64}")
+_SESSION_ID = re.compile(r"[0-9a-fA-F-]{16,64}")  # the shape seen live; other sane shapes are accepted with a log line
+_NOT_A_SESSION = re.compile(r"(?i)\s|<|\berror|errore|invalid|blocked|denied|not allowed|\bKO\b")
 
 MSG_OTP = (
     "Codice OTP non accettato: è sbagliato, scaduto, oppure l'account è bloccato. "
@@ -175,11 +176,15 @@ class ArssClient:
         return certs
 
     def open_session(self, auth: AuthCtx) -> str:
-        session_id = self._call("opensession", Identity=self._identity(auth.account, auth.password, auth.otp))
-        if not isinstance(session_id, str) or not _SESSION_ID.fullmatch(session_id.strip()):
-            code = re.search(r"\d{4}", session_id or "")
-            raise map_error(code.group(0) if code else None, session_id)
-        session_id = session_id.strip()
+        answer = self._call("opensession", Identity=self._identity(auth.account, auth.password, auth.otp))
+        session_id = answer.strip() if isinstance(answer, str) else ""
+        # Only an answer that clearly isn't a session id is an error: the OTP it cost must not be wasted
+        # just because Aruba changes the id's format.
+        if not session_id or len(session_id) > 256 or _NOT_A_SESSION.search(session_id):
+            code = re.search(r"\d{4}", session_id)
+            raise map_error(code.group(0) if code else None, session_id or "risposta vuota")
+        if not _SESSION_ID.fullmatch(session_id):
+            log.warning("session id in un formato nuovo (%d caratteri): accettato", len(session_id))
         register_secret(session_id)
         return session_id
 

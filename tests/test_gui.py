@@ -12,7 +12,7 @@ from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import QDropEvent  # noqa: E402
 from PySide6.QtWidgets import QDialog  # noqa: E402
 
-from firmaremota import config, credentials, profiles, verify  # noqa: E402
+from firmaremota import config, credentials, profiles, service, verify  # noqa: E402
 from firmaremota.arss.client import MSG_OTP  # noqa: E402
 from firmaremota.errors import CredentialsError, OtpError, ServiceError  # noqa: E402
 from firmaremota.gui.dialogs import OtpDialog, ProfileEditDialog, ProfilesDialog  # noqa: E402
@@ -62,6 +62,8 @@ def window(qtbot, store, api):
     w.ask_login = Recorder(None)
     # In-process instead of a spawned process: the tests' monkeypatched trust must stay visible.
     w.verify_fn = lambda path, cancel=None, original=None: verify.verify_file(path, original=original)
+    w.preflight_fn = service.preflight
+    w.ask_yes_no = Recorder(True)  # a user who says yes; tests about the guards replace it
     yield w
     wait_for_workers(qtbot, w)
 
@@ -114,12 +116,13 @@ def test_sign_other_file_single_result(window, qtbot, tmp_path):
     assert window.open_url.calls[-1] == (tmp_path / "fattura.xml.p7m",)
 
 
-def test_local_problem_never_asks_for_otp(window, api, tmp_path, make_pdf):
+def test_local_problem_never_asks_for_otp(window, api, qtbot, tmp_path, make_pdf):
     path = tmp_path / "protetto.pdf"
     path.write_bytes(make_pdf(A4, password="x"))
     window.prepare_sign([str(path)], Kind.PADES)
     window.options.sign.click()
-    assert window.show_error.calls and "password" in window.show_error.calls[0][1]
+    qtbot.waitUntil(lambda: bool(window.show_error.calls), timeout=10000)  # the checks run in the background
+    assert "password" in window.show_error.calls[0][1]
     assert "Non è stato usato nessun codice OTP" in window.show_error.calls[0][1]
     assert window.ask_otp.calls == [] and api.calls == []
 
@@ -135,17 +138,53 @@ def test_refused_otp_goes_home_and_warns_next_time(window, api, qtbot, tmp_path,
     window.prepare_sign(paths, Kind.PADES)
     window.options.sign.click()
     qtbot.waitUntil(lambda: len(window.show_error.calls) == 2, timeout=10000)  # second attempt fully done
+    assert window.ask_yes_no.calls and "rifiutato (1 di fila)" in window.ask_yes_no.calls[0][1]  # guard before Aruba
     assert window.ask_otp.calls[-1] == (1, 1, "", "Mario")  # the dialog showed the warning
     assert config.load_state().auth_failures == 2
 
 
-def test_wrong_password_stops_before_the_otp(window, api, qtbot, tmp_path, make_pdf):
+def test_wrong_password_stops_before_the_otp_and_offers_to_retype(window, api, qtbot, tmp_path, make_pdf):
     api.certs = CredentialsError("Nome utente, dominio o password non accettati dal servizio di firma Aruba.")
     window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
     window.options.sign.click()
-    qtbot.waitUntil(lambda: bool(window.show_error.calls), timeout=10000)
-    assert "non accettati" in window.show_error.calls[0][1]
-    assert window.ask_otp.calls == [] and api.names() == ["list_certs"]
+    qtbot.waitUntil(lambda: bool(window.ask_login.calls), timeout=10000)
+    assert "non accettati" in window.ask_yes_no.calls[-1][1] and "di nuovo la password" in window.ask_yes_no.calls[-1][1]
+    assert window.ask_login.calls == [(False, "Portachiavi di prova", "Mario")]  # declined (Recorder returns None)
+    assert window.ask_otp.calls == [] and api.names() == ["list_certs"] and window.stack.currentWidget() is window.home
+
+
+def test_retyped_password_replaces_the_refused_one(window, store, api, qtbot, tmp_path, make_pdf):
+    from .fakes import CERTS
+
+    api.certs = CredentialsError("Nome utente, dominio o password non accettati dal servizio di firma Aruba.")
+
+    def retype(*args, **kwargs):
+        api.certs = CERTS  # the new password works
+        return None, "nuova-pw", True
+
+    window.ask_login = retype
+    window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
+    window.options.sign.click()
+    wait_for(qtbot, window, window.result)
+    assert [c for c in api.calls if c[0] == "list_certs"] == [("list_certs", PASSWORD), ("list_certs", "nuova-pw")]
+    assert store.data[PW] == "nuova-pw" and window.result.title.text() == "Fatto! Documento firmato."
+
+
+def test_lockout_guard_before_contacting_aruba(window, api, qtbot, tmp_path, make_pdf):
+    config.save_state(config.State(auth_failures=2))
+    window.ask_yes_no = Recorder(False)
+    window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
+    window.options.sign.click()
+    qtbot.waitUntil(lambda: bool(window.ask_yes_no.calls), timeout=10000)
+    qtbot.wait(100)
+    assert "2 di fila" in window.ask_yes_no.calls[0][1] and api.calls == [] and window.stack.currentWidget() is window.home
+    window.home.support.click()  # the support report would send the password too
+    assert len(window.ask_yes_no.calls) == 2 and api.calls == []
+    window.ask_yes_no = Recorder(True)
+    window.prepare_sign(pdfs(tmp_path, make_pdf, "b.pdf"), Kind.PADES)
+    window.options.sign.click()
+    wait_for(qtbot, window, window.result)
+    assert api.names()[0] == "list_certs"
 
 
 def test_expiring_certificate_is_mentioned_in_the_otp_dialog(window, api, qtbot, tmp_path, make_pdf):
@@ -184,11 +223,13 @@ def test_missing_password_is_asked_and_remembered_after_aruba_accepts(window, st
 def test_refused_typed_password_is_not_remembered(window, store, api, qtbot, tmp_path, make_pdf):
     del store.data[PW]
     window.ask_login = Recorder((None, "sbagliata", True))
+    window.ask_yes_no = Recorder(False)  # and the user doesn't want to retype it
     api.certs = CredentialsError("Nome utente, dominio o password non accettati.")
     window.prepare_sign(pdfs(tmp_path, make_pdf, "a.pdf"), Kind.PADES)
     window.options.sign.click()
-    qtbot.waitUntil(lambda: bool(window.show_error.calls), timeout=10000)
-    assert PW not in store.data and window.ask_otp.calls == []
+    qtbot.waitUntil(lambda: bool(window.ask_yes_no.calls), timeout=10000)
+    qtbot.wait(100)
+    assert PW not in store.data and window.ask_otp.calls == [] and len(window.ask_login.calls) == 1
 
 
 def test_no_account_yet_adds_one_before_signing(window, store, api, qtbot, tmp_path, make_pdf):
@@ -535,6 +576,7 @@ def test_p7m_tsd_level_wraps(window, api, qtbot, store, tmp_path):
     window.options.timestamp.setChecked(True)
     window.options.level.setCurrentIndex(2)
     window.options.sign.click()  # no TSA account: refused before the OTP, with the explanation
+    qtbot.waitUntil(lambda: bool(window.show_error.calls), timeout=10000)
     assert "account di marca temporale" in window.show_error.calls[-1][1] and window.ask_otp.calls == []
     profiles.set_tsa(store, profiles.load_all(store)[0], TsaCredentials("tsa", "pw"))
     window.options.sign.click()
@@ -644,3 +686,17 @@ def test_profiles_dialog_marks_accounts_with_timestamp(qtbot, store, api):
     dialog = ProfilesDialog(None, lambda: api, store, profiles.load_all(store))
     qtbot.addWidget(dialog)
     assert "marca temporale" not in dialog.list.item(0).text() and "(con marca temporale)" in dialog.list.item(1).text()
+
+
+def test_labels_never_render_html(window, qtbot, tmp_path, make_p7m, pki, monkeypatch):
+    from PySide6.QtWidgets import QLabel
+
+    monkeypatch.setattr(verify, "default_trust", lambda: RootsTrust(pki["ca"]))
+    tricky = tmp_path / 'x<b style="color:green">valida<b>.pdf.p7m'  # tags, but no "/" (not a path separator)
+    tricky.write_bytes(make_p7m(PDF).replace(b"finto pdf", b"falso pdf"))  # tampered: NON valida
+    window.open_paths([str(tricky)])
+    wait_for(qtbot, window, window.verify_page)
+    assert window.verify_page.file.textFormat() == Qt.TextFormat.PlainText and "<b style" in window.verify_page.file.text()
+    assert "NON valida" in window.verify_page.title.text()
+    rich = [w for w in window.findChildren(QLabel) if w.textFormat() == Qt.TextFormat.RichText]
+    assert rich == []  # only the OTP/login dialogs use rich text, with escaped values

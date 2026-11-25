@@ -80,6 +80,7 @@ def write_new(directory: Path, name: str, data: bytes) -> Path:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
+            os.fchmod(f.fileno(), _FILE_MODE)  # the mode travels with the inode: no chmod-by-path afterwards
         use_links = True
         for candidate in candidates(name):
             target = directory / candidate
@@ -100,7 +101,6 @@ def write_new(directory: Path, name: str, data: bytes) -> Path:
                 continue
         else:
             raise FileError(f"Troppe copie di {name} in {directory}: scegli un'altra cartella.")
-        os.chmod(target, _FILE_MODE)
         return target
     except OSError as exc:
         raise FileError(f"Impossibile salvare {name} in {directory}: {exc.strerror}") from exc
@@ -118,6 +118,7 @@ def _write_exclusive(target: Path, data: bytes) -> None:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
+            os.fchmod(f.fileno(), _FILE_MODE)
     except BaseException:
         os.unlink(target)
         raise

@@ -26,9 +26,11 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import hashlib
+import io
 import ipaddress
 import logging
 import multiprocessing
+import pickle
 import socket
 import threading
 import time
@@ -36,7 +38,7 @@ from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from asn1crypto import cms, x509
@@ -87,18 +89,50 @@ def url_allowed(url: str) -> bool:
         return False
 
 
-async def _rejected(url: str):
-    raise requests.RequestException(f"destinazione non consentita: {url}")
+MAX_FETCH_BYTES = 8 * 1024 * 1024  # an OCSP response or CRL bigger than this is not something we want in memory
+MAX_FETCH_HOPS = 3
+
+
+def _fetch(method: str, url: str, *, data=None, headers: dict, timeout: float) -> requests.Response:
+    """GET/POST with every hop checked against `url_allowed` (redirects are followed by hand, never
+    automatically to an unchecked host) and the body capped at MAX_FETCH_BYTES."""
+    for _ in range(MAX_FETCH_HOPS + 1):
+        if not url_allowed(url):
+            raise requests.RequestException(f"destinazione non consentita: {url}")
+        response = requests.request(method, url, headers=headers, data=data, timeout=timeout,
+                                    allow_redirects=False, stream=True)
+        try:
+            if response.is_redirect and response.headers.get("location"):
+                url = urljoin(url, response.headers["location"])
+                if response.status_code == 303:
+                    method, data = "GET", None
+                continue
+            if response.status_code != 200:
+                raise requests.RequestException(f"status code {response.status_code}")
+            content = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                content += chunk
+                if len(content) > MAX_FETCH_BYTES:
+                    raise requests.RequestException("risposta troppo grande")
+            response._content = bytes(content)  # what the caller reads through `.content`
+            response._content_consumed = True
+            return response
+        finally:
+            response.close()
+    raise requests.RequestException("troppi reindirizzamenti")
 
 
 class _PublicOnly:
-    """Mixed into the requests-based fetchers: the URL is checked before any connection is made."""
+    """Mixed into the requests-based fetchers: replaces their plain `requests.get/post` with `_fetch`."""
 
-    def _get(self, url, **kwargs):
-        return super()._get(url, **kwargs) if url_allowed(url) else _rejected(url)
+    def _get(self, url, *, acceptable_content_types):
+        headers = {"Accept": ",".join(acceptable_content_types), "User-Agent": self.user_agent}
+        return asyncio.to_thread(_fetch, "GET", url, headers=headers, timeout=self.per_request_timeout)
 
-    def _post(self, url, data, **kwargs):
-        return super()._post(url, data, **kwargs) if url_allowed(url) else _rejected(url)
+    def _post(self, url, data, *, content_type, acceptable_content_types):
+        headers = {"Accept": ",".join(acceptable_content_types), "User-Agent": self.user_agent,
+                   "Content-Type": content_type}
+        return asyncio.to_thread(_fetch, "POST", url, data=data, headers=headers, timeout=self.per_request_timeout)
 
 
 class _PublicOCSPFetcher(_PublicOnly, RequestsOCSPFetcher):
@@ -553,6 +587,25 @@ def has_timestamp(kind: Kind, data: bytes) -> bool:
 
 # --- running in a separate process ----------------------------------------------------------------
 
+# What the verification child is allowed to send back: our own plain data types and the standard
+# library pieces they contain. Anything else in the pickle (a compromised child trying `os.system`)
+# is refused, so the child stays a crash/hang sandbox rather than a way back into the GUI process.
+_SAFE_MODULES = {"datetime", "pathlib", "pathlib._local", "firmaremota.models"}
+_SAFE_BUILTINS = {"set", "frozenset", "list", "dict", "tuple", "bytes", "bytearray", "str", "int", "float",
+                  "bool", "complex", "NoneType", "range", "slice"}
+
+
+class RestrictedUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if (module == "builtins" and name in _SAFE_BUILTINS) or module in _SAFE_MODULES:
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(f"oggetto non ammesso dal processo di verifica: {module}.{name}")
+
+
+def _loads(payload: bytes):
+    return RestrictedUnpickler(io.BytesIO(payload)).load()
+
+
 def _child_main(conn, fn, args, kwargs) -> None:  # runs in the child process
     try:
         from . import logsetup
@@ -561,11 +614,13 @@ def _child_main(conn, fn, args, kwargs) -> None:  # runs in the child process
     except Exception:  # noqa: BLE001 - logging is a nicety here
         pass
     try:
-        conn.send(("ok", fn(*args, **kwargs)))
+        message = ("ok", fn(*args, **kwargs))
     except FirmaError as exc:
-        conn.send(("firma", type(exc).__name__, exc.message, exc.detail))
+        message = ("firma", type(exc).__name__, exc.message, exc.detail)
     except BaseException as exc:  # noqa: BLE001 - everything must be reported to the parent
-        conn.send(("error", f"{type(exc).__name__}: {exc}"))
+        message = ("error", f"{type(exc).__name__}: {exc}")
+    try:
+        conn.send_bytes(pickle.dumps(message, protocol=pickle.HIGHEST_PROTOCOL))
     finally:
         conn.close()
 
@@ -591,7 +646,7 @@ def run_isolated(fn: Callable, *args, timeout: float = VERIFY_TIMEOUT, cancel: t
                     f"Il controllo ha superato il tempo massimo ({int(timeout)} s): il file potrebbe essere "
                     "danneggiato o costruito apposta per bloccare il programma.")
         try:
-            message = parent.recv()
+            message = _loads(parent.recv_bytes())
         except EOFError:  # the child died without reporting: segfault, os._exit, OOM kill...
             process.join(5)
             raise FileError("Il controllo si è interrotto in modo anomalo: il file potrebbe essere "
@@ -605,9 +660,11 @@ def run_isolated(fn: Callable, *args, timeout: float = VERIFY_TIMEOUT, cancel: t
         return message[1]
     if message[0] == "firma":
         _, name, text, detail = message
-        cls = getattr(errors, name, FirmaError)
-        raise cls(text, detail=detail)
-    raise FileError("Il controllo non è riuscito per un errore imprevisto.", detail=message[1])
+        cls = getattr(errors, str(name), None)
+        if not (isinstance(cls, type) and issubclass(cls, FirmaError)):
+            cls = FirmaError
+        raise cls(str(text), detail=None if detail is None else str(detail))
+    raise FileError("Il controllo non è riuscito per un errore imprevisto.", detail=str(message[1]))
 
 
 def verify_file_isolated(path: Path, cancel: threading.Event | None = None, timeout: float = VERIFY_TIMEOUT, *,

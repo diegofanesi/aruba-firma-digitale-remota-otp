@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 import datetime as dt
 
 from .. import config, credentials, diagnostics, files, messages, profiles, service, verify
-from ..errors import FileError, FirmaError, OriginalRequired, TimestampError
+from ..errors import CredentialsError, FileError, FirmaError, OriginalRequired, TimestampError
 from ..logsetup import log_path, register_paths
 from ..models import LAST_PAGE, JobResult, Kind, Position, SignJob, StampSpec, TimestampType, VerifyReport
 from . import worker
@@ -46,10 +46,17 @@ def verdict_style(report: VerifyReport) -> tuple[str, str]:
 
 def _label(text: str = "", name: str = "", wrap: bool = True) -> QLabel:
     label = QLabel(text)
+    label.setTextFormat(Qt.TextFormat.PlainText)  # file names and aliases must never be rendered as HTML
     label.setWordWrap(wrap)
     if name:
         label.setObjectName(name)
     return label
+
+
+def _isolated_preflight(jobs: list[SignJob], level: TimestampType | None = None) -> list[str]:
+    """The local checks parse user files (PDFs): run them in a separate process with a time limit,
+    so a crafted file can neither hang nor crash the window."""
+    return verify.run_isolated(service.preflight, jobs, level=level, timeout=120)
 
 
 def _big_button(text: str) -> QPushButton:
@@ -478,6 +485,7 @@ class MainWindow(QMainWindow):
         self.mode = "sign"  # what the result page is about: "sign" or "timestamp"
         self.last_level: TimestampType | None = None
         self.verify_fn = verify.verify_file_isolated  # (path, cancel) -> VerifyReport; tests swap it
+        self.preflight_fn = _isolated_preflight  # (jobs, level) -> problems; tests swap it
         self.store: credentials.Store | None = None
         self.profiles: list[profiles.Profile] = []
         self.current: profiles.Profile | None = None  # the account that signs
@@ -693,9 +701,26 @@ class MainWindow(QMainWindow):
             _, password, remember = answer
         return profile.user, profile.domain, password, remember, profile
 
+    def confirm_after_failures(self) -> bool:
+        """The same guard the command line has: after a refused login, nothing is sent to Aruba without a
+        yes from the user (a few refusals in a row can lock the account)."""
+        failures = service.auth_failures()
+        if failures == 0:
+            return True
+        return self.ask_yes_no("Attenzione", f"L'ultimo accesso al servizio di firma è stato rifiutato ({failures} di "
+                               "fila). Un altro errore potrebbe bloccare l'account Aruba.\n\nRiprovare comunque?")
+
     def sign(self, jobs: list[SignJob], level: TimestampType | None = None) -> None:
-        """Local checks, then the account check with Aruba (no OTP), then the OTP, then signing."""
-        problems = service.preflight(jobs, level=level)
+        """Local checks (in a separate process), then the account check with Aruba (no OTP), then the OTP,
+        then signing."""
+        self.mode, self.last_level = "sign", level
+        self.progress.start("Controllo dei file...", total=None, cancellable=False)
+        self.stack.setCurrentWidget(self.progress)
+        job = worker.Worker(self.preflight_fn, jobs, level=level)
+        worker.start(self, job, lambda problems: self._sign_checked(jobs, level, problems), self.sign_failed)
+
+    def _sign_checked(self, jobs: list[SignJob], level: TimestampType | None, problems: list[str]) -> None:
+        self.go_home()
         if problems:
             self.show_error("Impossibile firmare", "\n".join(problems) + "\n\nNon è stato usato nessun codice OTP.")
             return
@@ -708,13 +733,18 @@ class MainWindow(QMainWindow):
         if problem:
             self.show_error("Serve un account di marca temporale", problem + "\n\nNon è stato usato nessun codice OTP.")
             return
-        settings = config.load()
-        self.mode, self.last_level = "sign", level
+        if not self.confirm_after_failures():
+            return
+        self._check_account(jobs, level, user, domain, password, remember, profile)
+
+    def _check_account(self, jobs, level, user, domain, password, remember, profile) -> None:
+        """Ask Aruba to accept the password (no OTP) before anything else is asked of the user."""
         self.pending = {"jobs": jobs, "password": password, "remember": remember, "profile": profile,
-                        "who": profile.alias if profile else f"{user}@{domain}", "level": level, "user": user}
+                        "who": profile.alias if profile else f"{user}@{domain}", "level": level, "user": user,
+                        "domain": domain}
         self.progress.start("Controllo dell'account con Aruba...", total=None, cancellable=False)
         self.stack.setCurrentWidget(self.progress)
-        job = worker.Worker(service.prepare_account, self.api, user, domain, password, settings)
+        job = worker.Worker(service.prepare_account, self.api, user, domain, password, config.load())
         worker.start(self, job, self.account_ready, self.sign_failed)
 
     def account_ready(self, result) -> None:
@@ -766,10 +796,17 @@ class MainWindow(QMainWindow):
             self.timestamp(paths, Kind.TSR if fmt == "tsr" else Kind.TSD)
 
     def timestamp(self, paths: list[str], kind: Kind) -> None:
-        """Local checks, the TSA account saved for the current profile (no check with Aruba: it would spend a
-        mark), then the timestamps. Firma Remota's included marks don't apply: they are only for signatures."""
+        """Local checks (in a separate process), the TSA account saved for the current profile (no check with
+        Aruba: it would spend a mark), then the timestamps. Firma Remota's included marks don't apply here."""
         jobs = [SignJob(Path(p), kind) for p in paths]
-        problems = service.preflight(jobs)
+        self.mode = "timestamp"
+        self.progress.start("Controllo dei file...", total=None, cancellable=False)
+        self.stack.setCurrentWidget(self.progress)
+        job = worker.Worker(self.preflight_fn, jobs)
+        worker.start(self, job, lambda problems: self._timestamp_checked(jobs, problems), self.sign_failed)
+
+    def _timestamp_checked(self, jobs: list[SignJob], problems: list[str]) -> None:
+        self.go_home()
         if problems:
             self.show_error("Impossibile marcare", "\n".join(problems))
             return
@@ -777,7 +814,7 @@ class MainWindow(QMainWindow):
         tsa = self.tsa_for_marks()
         if tsa is None:
             return
-        self.mode, self.cancel_event = "timestamp", threading.Event()
+        self.cancel_event = threading.Event()
         self.progress.start("Marca temporale in corso...", total=len(jobs), cancellable=len(jobs) > 1)
         self.stack.setCurrentWidget(self.progress)
         job = worker.Worker(service.timestamp_batch, self.api, tsa, jobs, cancel=self.cancel_event)
@@ -792,9 +829,19 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.result)
 
     def sign_failed(self, exc: Exception) -> None:
-        self.pending = None
+        pending, self.pending = self.pending, None
         self.go_home()
-        self.show_error("Firma non riuscita", _error_text(exc))
+        if isinstance(exc, CredentialsError) and pending and pending["profile"] and self.store:
+            # Aruba refused the password (saved, or just typed): offer to type it again instead of leaving
+            # a wrong one in place, where every further click would cost another refusal
+            if self.ask_yes_no("Password non accettata", _error_text(exc) + "\n\nVuoi scrivere di nuovo la password?"):
+                answer = self.ask_login(need_user=False, store_name=self.store.name, who=pending["who"])
+                if answer is not None:
+                    _, password, remember = answer
+                    self._check_account(pending["jobs"], pending["level"], pending["user"], pending["domain"],
+                                        password, remember, pending["profile"])
+            return
+        self.show_error("Firma non riuscita" if self.mode == "sign" else "Marca temporale non riuscita", _error_text(exc))
 
     def open_signed_document(self) -> None:
         signed = [r for r in self.results if r.ok]
@@ -873,6 +920,8 @@ class MainWindow(QMainWindow):
     # --- support -----------------------------------------------------------------------------
 
     def support(self) -> None:
+        if not self.confirm_after_failures():  # the report sends the saved password to Aruba
+            return
         self.progress.start("Controllo in corso...", total=None, cancellable=False)
         self.stack.setCurrentWidget(self.progress)
         job = worker.Worker(diagnostics.report, self.api, check_credentials=True,

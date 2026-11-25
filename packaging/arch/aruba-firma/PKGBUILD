@@ -65,12 +65,12 @@ _vendored=(
   pyhanko-0.38.2-py3-none-any.whl
 )
 # The main tarball: AUR builds (and anyone running makepkg against this file as checked out on
-# GitHub) fetch the tagged release, as AUR requires. packaging/install.sh instead rewrites just
-# these two lines to a tarball it builds from the local working tree, so a plain `git clone` +
-# `./install.sh` never needs a pushed tag. Keep both as single, whole-line assignments: the two
-# `sed -i '/^_pkgsource/s/.../'` calls in install.sh match on that.
+# GitHub) fetch the tagged release, as AUR requires. The repository's root install.sh instead
+# rewrites these two assignments (sed on `^_pkgsource=` and `^_pkgsource_sha256=`) to a tarball it
+# builds from the local checkout, so a plain `git clone` + `./install.sh` never needs a pushed tag.
+# Keep both as single, whole-line assignments. The sha256 is pinned by packaging/arch/release.sh
+# right after each tag is pushed.
 _pkgsource="$pkgname-$pkgver.tar.gz::https://github.com/diegofanesi/$_reponame/archive/refs/tags/v$pkgver.tar.gz"
-# Pinned by packaging/arch/release.sh right after the tag is pushed (the value below is v0.1.0's until then).
 _pkgsource_sha256='554c5373d42390e1181f0b7e7fb756c82818095732a6ae21f1c326b71b0e0b40'
 
 source=("$_pkgsource"

@@ -23,8 +23,10 @@ TSR_NOTE = ("Con il formato TSR la marca è un file separato: se la mandi a qual
 WARNING_STYLE = "color: #b3261e; font-weight: bold;"
 
 
-def _label(text: str, *, wrap: bool = True, style: str = "") -> QLabel:
+def _label(text: str, *, wrap: bool = True, style: str = "", rich: bool = False) -> QLabel:
+    """Plain text unless `rich`: Qt would otherwise render tags found in file names or aliases."""
     label = QLabel(text)
+    label.setTextFormat(Qt.TextFormat.RichText if rich else Qt.TextFormat.PlainText)
     label.setWordWrap(wrap)
     if style:
         label.setStyleSheet(style)
@@ -40,12 +42,12 @@ class OtpDialog(QDialog):
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         if who:
-            layout.addWidget(_label(f"Account: <b>{html.escape(who)}</b>"))
-        layout.addWidget(_label("Apri l'app <b>Aruba OTP</b> sul telefono e scrivi qui il codice che vedi."))
+            layout.addWidget(_label(f"Account: <b>{html.escape(who)}</b>", rich=True))
+        layout.addWidget(_label("Apri l'app <b>Aruba OTP</b> sul telefono e scrivi qui il codice che vedi.", rich=True))
         if note:
             layout.addWidget(_label(note, style=WARNING_STYLE))
         if count > 1:
-            layout.addWidget(_label(f"Con questo codice firmerai <b>{count} file</b>."))
+            layout.addWidget(_label(f"Con questo codice firmerai <b>{count} file</b>.", rich=True))
         self.code = QLineEdit()
         self.code.setFont(QFont(self.code.font().family(), 28))
         self.code.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -94,7 +96,7 @@ class LoginDialog(QDialog):
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         if who:
-            layout.addWidget(_label(f"Account: <b>{html.escape(who)}</b>"))
+            layout.addWidget(_label(f"Account: <b>{html.escape(who)}</b>", rich=True))
         layout.addWidget(_label("Scrivi i dati del tuo account di firma remota Aruba." if need_user
                                 else "Scrivi la password del tuo account di firma remota Aruba."))
         form = QFormLayout()
@@ -336,7 +338,10 @@ class ProfilesDialog(QDialog):
         return self.profiles[row] if 0 <= row < len(self.profiles) else None
 
     def confirm(self, text: str) -> bool:  # seam for tests
-        return QMessageBox.question(self, "Conferma", text) == QMessageBox.StandardButton.Yes
+        box = QMessageBox(QMessageBox.Icon.Question, "Conferma", text,
+                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, parent=self)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        return box.exec() == QMessageBox.StandardButton.Yes
 
     def _edit_dialog(self, profile: profiles.Profile | None) -> None:
         dialog = ProfileEditDialog(self, self.api_factory, self.store, self.profiles, profile)

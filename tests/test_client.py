@@ -34,6 +34,16 @@ def test_open_session_sends_otp_and_returns_id():
     assert transport.field(0, "typeHSM") == "COSIGN"
 
 
+def test_unusual_session_id_is_accepted_not_wasted():
+    """A session id in a new format must not be treated as an error: the OTP it cost is gone either way."""
+    api, _ = client({"opensession": soap("opensession", "<return>SESSION_abc-XYZ_0123456789:v2</return>")})
+    assert api.open_session(AuthCtx(ACCOUNT, PASSWORD, OTP)) == "SESSION_abc-XYZ_0123456789:v2"
+    for bad in ("", "  ", "KO Domain Not Allowed", "Errore generico", "<html>", "x" * 300):
+        api, _ = client({"opensession": soap("opensession", f"<return>{bad.replace('<', '&lt;')}</return>")})
+        with pytest.raises((ServiceError, CredentialsError)):
+            api.open_session(AuthCtx(ACCOUNT, PASSWORD, OTP))
+
+
 def test_open_session_rejects_non_id_answers():
     api, _ = client({"opensession": soap("opensession", "<return>KO-0004 Otp Credential Invalid Or Blocked</return>")})
     with pytest.raises(OtpError):

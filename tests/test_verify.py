@@ -191,7 +191,7 @@ def test_public_only_fetchers_never_connect_to_private_hosts(monkeypatch):
     import requests
 
     calls = []
-    monkeypatch.setattr(verify.requests, "get", lambda **kw: calls.append(kw) or (_ for _ in ()).throw(OSError))
+    monkeypatch.setattr(verify.requests, "request", lambda *a, **kw: calls.append(kw) or (_ for _ in ()).throw(OSError))
     fetchers = verify.PublicOnlyFetcherBackend().get_fetchers()
     for fetcher in (fetchers.ocsp_fetcher, fetchers.crl_fetcher, fetchers.cert_fetcher):
         with pytest.raises(requests.RequestException, match="non consentita"):
@@ -496,3 +496,79 @@ def test_tsd_signatures_intact(make_tsd, make_tsr, make_token):
 def test_unknown_file_message_mentions_timestamps():
     with pytest.raises(FileError, match="marca temporale"):
         verify.verify_bytes("a.txt", b"ciao", RootsTrust())
+
+
+class _FakeResponse:
+    def __init__(self, status, headers=None, body=b""):
+        self.status_code, self.headers, self._body = status, headers or {}, body
+        self.is_redirect = status in (301, 302, 303, 307, 308) and "location" in self.headers
+        self.closed = False
+
+    def iter_content(self, size):
+        for i in range(0, len(self._body), size):
+            yield self._body[i:i + size]
+
+    @property
+    def content(self):  # requests reads `_content` once `_fetch` has filled it
+        return self._content
+
+    def close(self):
+        self.closed = True
+
+
+def _public(monkeypatch):
+    monkeypatch.setattr(verify, "url_allowed", lambda url: "lan." not in url and "127." not in url)
+
+
+def test_fetch_follows_redirects_only_to_public_hosts(monkeypatch):
+    import requests
+
+    _public(monkeypatch)
+    seen = []
+
+    def fake_request(method, url, **kwargs):
+        seen.append((method, url, kwargs["allow_redirects"]))
+        if url.endswith("/start"):
+            return _FakeResponse(302, {"location": "/ocsp"})
+        if url.endswith("/ocsp"):
+            return _FakeResponse(200, body=b"ok" * 10)
+        if url.endswith("/evil"):
+            return _FakeResponse(302, {"location": "http://lan.example/admin"})
+        raise AssertionError(url)
+
+    monkeypatch.setattr(verify.requests, "request", fake_request)
+    response = verify._fetch("POST", "http://ocsp.example/start", data=b"q", headers={}, timeout=5)
+    assert response.content == b"ok" * 10 and seen[0][2] is False and seen[1][1] == "http://ocsp.example/ocsp"
+    with pytest.raises(requests.RequestException, match="non consentita"):
+        verify._fetch("GET", "http://ocsp.example/evil", headers={}, timeout=5)
+    assert not any("lan." in url for _, url, _ in seen)  # the private hop was never requested
+
+
+def test_fetch_caps_size_and_hops(monkeypatch):
+    import requests
+
+    _public(monkeypatch)
+    monkeypatch.setattr(verify, "MAX_FETCH_BYTES", 100)
+    monkeypatch.setattr(verify.requests, "request", lambda m, url, **kw: _FakeResponse(200, body=b"x" * 101))
+    with pytest.raises(requests.RequestException, match="troppo grande"):
+        verify._fetch("GET", "http://ocsp.example/big", headers={}, timeout=5)
+    monkeypatch.setattr(verify.requests, "request", lambda m, url, **kw: _FakeResponse(301, {"location": url + "/x"}))
+    with pytest.raises(requests.RequestException, match="reindirizzamenti"):
+        verify._fetch("GET", "http://ocsp.example/loop", headers={}, timeout=5)
+
+
+def test_restricted_unpickler_refuses_code_objects():
+    import os
+    import pickle
+
+    with pytest.raises(pickle.UnpicklingError, match="non ammesso"):
+        verify._loads(pickle.dumps(os.system))
+    with pytest.raises(pickle.UnpicklingError):
+        verify._loads(pickle.dumps(verify.FirmaError))  # not even our exception classes travel as objects
+    report = verify.VerifyReport(Kind.TSD, [], None, True)
+    assert verify._loads(pickle.dumps(report)) == report  # our data types and datetimes do
+    assert verify._loads(pickle.dumps(("firma", "OriginalRequired", "x", None))) == ("firma", "OriginalRequired", "x", None)
+
+
+def test_run_isolated_only_raises_firma_errors():
+    assert verify.run_isolated(_echo, [1, 2]) == [1, 2]  # lists of builtins still pass
