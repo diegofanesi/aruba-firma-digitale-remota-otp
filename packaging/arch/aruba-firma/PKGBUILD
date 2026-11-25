@@ -6,7 +6,7 @@
 # must already be pushed to the repository (packaging/arch/release.sh does both).
 pkgname=aruba-firma
 _reponame=aruba-firma-digitale-remota-otp
-pkgver=0.3.0
+pkgver=0.3.1
 pkgrel=1
 pkgdesc="Firma digitale remota Aruba: firma, verifica ed estrai documenti (riga di comando e interfaccia grafica)"
 url="https://github.com/diegofanesi/$_reponame"
