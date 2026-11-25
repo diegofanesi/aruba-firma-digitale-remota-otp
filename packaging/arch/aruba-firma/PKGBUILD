@@ -71,7 +71,7 @@ _vendored=(
 # Keep both as single, whole-line assignments. The sha256 is pinned by packaging/arch/release.sh
 # right after each tag is pushed.
 _pkgsource="$pkgname-$pkgver.tar.gz::https://github.com/diegofanesi/$_reponame/archive/refs/tags/v$pkgver.tar.gz"
-_pkgsource_sha256='161053ab26bc1be6a574a90188c574a9e1499c743a892fa6823f9398e4a55c00'
+_pkgsource_sha256='54422c0e1291e91df0fa41a1dcf4c107b9bdfb2c87666380f3cec3016c5fba8d'
 
 source=("$_pkgsource"
         "https://files.pythonhosted.org/packages/a0/20/075b0b5bed54848fd685b1354fe130983ed3b3b008c6818c8b1ef135181e/uritools-7.0.1-py3-none-any.whl"
