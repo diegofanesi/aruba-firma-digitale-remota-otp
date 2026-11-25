@@ -11,6 +11,7 @@ from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .. import logsetup
+from .collector import GuiThreadCollector
 from .main_window import MainWindow
 
 log = logging.getLogger("firmaremota.gui")
@@ -77,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     except OSError:
         pass
     app = create_app(sys.argv[:1])
+    collector = GuiThreadCollector(app)  # garbage collection only in this thread: see collector.py
     window = MainWindow(make_api)
     _install_excepthook(window)
     window.resize(1100, 740)
@@ -86,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     if smoke_test:  # installer check: the window could be built and shown
         QTimer.singleShot(800, app.quit)
     code = app.exec()
+    collector.timer.stop()
     if smoke_test:
         print("ok: interfaccia grafica avviata")
     return code

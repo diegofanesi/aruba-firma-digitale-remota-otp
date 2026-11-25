@@ -42,13 +42,25 @@ class _Relay(QObject):
         super().__init__(parent)
         self._done, self._error, self._progress = on_done, on_error, on_progress
 
+    def _release(self) -> None:
+        """The run is over: let go of the callbacks. They usually capture the window or dialog that
+        started the run, which holds this relay through its thread: a reference cycle that only the
+        garbage collector could break, keeping a closed dialog alive until then."""
+        self._done = self._error = self._progress = None
+
     @Slot(object)
     def done(self, result) -> None:
-        self._done(result)
+        callback = self._done
+        self._release()
+        if callback:
+            callback(result)
 
     @Slot(object)
     def error(self, exc) -> None:
-        self._error(exc)
+        callback = self._error
+        self._release()
+        if callback:
+            callback(exc)
 
     @Slot(int, int, str)
     def progress(self, done: int, total: int, name: str) -> None:
