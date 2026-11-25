@@ -9,12 +9,16 @@ import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import config, files, p7m, stamp, tst, verify
 from .arss.client import ArssApi
-from .errors import CredentialsError, FileError, FirmaError, OtpError, ServiceError, TimestampError
+from .errors import CredentialsError, FileError, FirmaError, OtpError, ServiceError, TimestampError, TimestampUnavailable
 from .logsetup import register_paths, register_personal, register_secret
 from .models import Account, AuthCtx, JobResult, Kind, SignerInfo, SignJob, TimestampType, TsaCredentials
+
+if TYPE_CHECKING:
+    from .timestamping import FreeTimestamps
 
 log = logging.getLogger("firmaremota.service")
 
@@ -177,8 +181,10 @@ def _checked_input(job: SignJob) -> bytes:
 
 
 def _sign_one(api: ArssApi, auth: AuthCtx, job: SignJob, out_dir: Path | None, signer_name: str | None,
-              wrap: TsaCredentials | None = None) -> JobResult:
-    """Sign one file; with `wrap`, also put the signed .p7m into a .tsd envelope (ArubaSign's "TSD").
+              wrap: TsaCredentials | None = None, free: FreeTimestamps | None = None,
+              on_retry: Callable[[int], None] | None = None) -> JobResult:
+    """Sign one file; with `wrap`, also put the signed .p7m into a .tsd envelope (ArubaSign's "TSD");
+    with `free`, add the free Belgian timestamp, or keep the signature without one if that fails.
 
     The result says whether the saved file carries a timestamp: asked for, or applied by Aruba on its own
     (accounts with "Marca automaticamente tutti i documenti firmati" get one without asking)."""
@@ -212,9 +218,16 @@ def _sign_one(api: ArssApi, auth: AuthCtx, job: SignJob, out_dir: Path | None, s
     if wrap is not None:  # TSD: the signed envelope itself gets timestamped
         signed, name = _wrapped(api, wrap, signed, job.src.name), files.tsd_name(Path(name))
         timestamped = True
+    warning = None
+    if free is not None and not timestamped:
+        try:  # what comes back has passed the same checks as above, plus the timestamp's own
+            signed, timestamped = free.stamp(job.kind, data, signed, on_retry=on_retry), True
+        except TimestampUnavailable as exc:  # the signature is fine: save it without the timestamp
+            log.warning("%s: %s (%s)", job.src.name, exc.message, exc.detail or "-")
+            warning = exc.message
     output = files.write_new(output_dir(job, out_dir), name, signed)
     register_paths(output)
-    return JobResult(job, output=output, timestamped=timestamped)
+    return JobResult(job, output=output, timestamped=timestamped, warning=warning)
 
 
 def _wrapped(api: ArssApi, tsa: TsaCredentials, data: bytes, name: str) -> bytes:
@@ -245,6 +258,7 @@ def sign_batch(
     tsa: TsaCredentials | None = None,
     level: TimestampType | None = None,
     session_id: str | None = None,
+    free: FreeTimestamps | None = None,
 ) -> list[JobResult]:
     """Sign every job with a single OTP. Nothing is ever retried.
 
@@ -255,12 +269,20 @@ def sign_batch(
     TSD (for .p7m only) as a .tsd envelope around the signed file. A requested timestamp that
     doesn't come back is an error: the file is not saved.
 
+    With `free` instead, the free Belgian timestamp is added here after Aruba has signed. When the
+    service fails (3 attempts), the signature is saved without it and the result carries a warning;
+    the rest of the batch then skips the attempts.
+
     Raises OtpError/CredentialsError/NetworkError if the session can't be opened. After that,
     a local problem with one file skips just that file; any error from the service stops the
     batch and the remaining files are reported as not signed.
     """
     if not jobs:
         return []  # never spend an OTP on nothing
+    if free is not None and (level is not None or tsa is not None):
+        raise ValueError("una sola fonte di marca temporale per volta")
+    if free is not None and cancel is not None:
+        free.cancel = cancel  # a cancel also cuts the waits between attempts short
     problem = needs_tsa_account(level, tsa)
     if problem:
         raise TimestampError(problem)
@@ -286,8 +308,12 @@ def sign_batch(
                 break
             if progress:
                 progress(index, len(jobs), job.src.name)
+            def on_retry(attempt: int, index: int = index, name: str = job.src.name) -> None:
+                if progress:
+                    progress(index, len(jobs), f"{name} (marca temporale, tentativo {attempt} di {free.attempts})")
+
             try:
-                results.append(_sign_one(api, auth, job, out_dir, signer_name, wrap))
+                results.append(_sign_one(api, auth, job, out_dir, signer_name, wrap, free, on_retry))
             except FileError as exc:
                 log.warning("%s: %s", job.src.name, exc.message)
                 results.append(JobResult(job, error=exc))

@@ -324,3 +324,76 @@ def test_timestamp_batch_cancel_progress_and_changed_file(docs, api_t, make_pdf)
     (docs / "a.pdf").write_bytes(make_pdf((300, 300, 0, None)))
     results = service.timestamp_batch(api_t, TSA, work)
     assert not results[0].ok and "è cambiato" in results[0].error.message and api_t.calls == []
+
+
+# --- the free (Belgian) timestamp ------------------------------------------------------------------------
+
+@pytest.fixture
+def free_tsa(monkeypatch, timestamper, pki):
+    """The real FreeTimestamps against a fake TSA (see test_timestamping); `failures` = attempts that fail."""
+    from firmaremota import timestamping
+
+    from .test_timestamping import FakeTsa, QualifiedRoots
+
+    def make(failures=0):
+        fake = FakeTsa(timestamper, failures=failures)
+        monkeypatch.setattr(timestamping, "_post", fake)
+        stamps = timestamping.FreeTimestamps(trust_factory=lambda: QualifiedRoots(pki["ca"]), sleep=lambda s: True)
+        return stamps, fake
+
+    return make
+
+
+def test_free_timestamp_on_every_file_and_nothing_asked_of_aruba(docs, make_p7m, sign_pdf, free_tsa):
+    api = FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf)
+    stamps, fake = free_tsa()
+    results = service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs), free=stamps)
+    assert [(r.ok, r.timestamped, r.warning) for r in results] == [(True, True, None)] * 3
+    assert api.tsa_seen == [(None, None)] * 3  # Aruba is asked for a plain signature
+    assert len(fake.requests) == 3
+    for result in results:
+        kind = result.job.kind
+        assert verify.has_timestamp(kind, result.output.read_bytes())
+        assert verify.signatures_intact(kind, result.output.read_bytes())
+
+
+def test_free_timestamp_down_signatures_saved_without_it_and_one_wait_only(docs, make_p7m, sign_pdf, free_tsa):
+    api = FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf)
+    stamps, fake = free_tsa(failures=99)
+    seen = []
+    results = service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs), free=stamps,
+                                 progress=lambda done, total, name: seen.append(name))
+    assert [r.ok for r in results] == [True, True, True] and not any(r.timestamped for r in results)
+    assert all(r.warning and "3 tentativi" in r.warning for r in results)
+    assert len(fake.requests) == 3  # three attempts on the first file, none on the others
+    assert "a.pdf (marca temporale, tentativo 2 di 3)" in seen and "a.pdf (marca temporale, tentativo 3 di 3)" in seen
+    assert api.names()[-1] == "close_session"
+    for result in results:  # the plain signatures, as Aruba returned them
+        assert not verify.has_timestamp(result.job.kind, result.output.read_bytes())
+        assert verify.signatures_intact(result.job.kind, result.output.read_bytes())
+    assert service.auth_failures() == 0  # a timestamp problem is never a login problem
+
+
+def test_free_timestamp_skipped_when_aruba_already_added_one(docs, make_cades_t, sign_pdf, free_tsa):
+    api = FakeArss(make_p7m=make_cades_t, sign_pdf=lambda pdf: sign_pdf(pdf, timestamp=True))
+    stamps, fake = free_tsa()
+    results = service.sign_batch(api, ACCOUNT, "pw", OTP, jobs(docs), free=stamps)
+    assert all(r.timestamped and r.warning is None for r in results) and fake.requests == []
+
+
+def test_free_timestamp_never_saves_a_broken_stamp(docs, make_p7m, sign_pdf, free_tsa, monkeypatch):
+    from firmaremota import timestamping
+
+    api = FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf)
+    stamps, _ = free_tsa()
+    monkeypatch.setattr(timestamping, "stamp_cades", lambda signed, client: signed[:-40] + b"\x00" * 40)
+    (result,) = service.sign_batch(api, ACCOUNT, "pw", OTP, [SignJob(docs / "c.xml", Kind.CADES)], free=stamps)
+    assert result.ok and not result.timestamped and result.warning
+    assert verify.signatures_intact(Kind.CADES, result.output.read_bytes())  # what Aruba returned, untouched
+
+
+def test_free_timestamp_excludes_the_aruba_options(docs, make_p7m, free_tsa):
+    stamps, _ = free_tsa()
+    with pytest.raises(ValueError):
+        service.sign_batch(FakeArss(make_p7m=make_p7m), ACCOUNT, "pw", OTP, jobs(docs), free=stamps,
+                           level=TimestampType.T)
