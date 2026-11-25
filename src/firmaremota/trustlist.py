@@ -1,11 +1,15 @@
-"""The official lists of qualified signing authorities (EU list of trusted lists -> Italian list).
+"""The official lists of qualified signing authorities (EU list of trusted lists -> national lists).
 
-Both the EU list (LOTL) and the Italian list are downloaded over HTTPS and their XML signatures
-verified (the LOTL against the signer certificates bundled with pyHanko, the Italian list against
-the certificates the LOTL names for it). Both are cached, and **re-verified the same way every
+The EU list (LOTL) and the national lists are downloaded over HTTPS and their XML signatures
+verified (the LOTL against the signer certificates bundled with pyHanko, each national list against
+the certificates the LOTL names for it). They are cached, and **re-verified the same way every
 time they are loaded from the cache**: the cache is just a copy, never a source of trust. The
 cache is refreshed once older than MAX_AGE; when the network is down an older copy is used and
 the report says so.
+
+The Italian list is required. The Belgian one is optional: it is only needed for the free Belgian
+timestamps; if it can't be had, Italian signatures are still checked (and the download of the
+missing list is retried at most once a day).
 """
 
 from __future__ import annotations
@@ -27,8 +31,10 @@ from .errors import FirmaError
 
 log = logging.getLogger("firmaremota.trustlist")
 
-TERRITORIES = ("IT",)
+REQUIRED = ("IT",)
+TERRITORIES = ("IT", "BE")  # BE: the free qualified time-stamping service of the Belgian government
 MAX_AGE = dt.timedelta(days=7)
+RETRY_MISSING = dt.timedelta(days=1)  # an optional list that failed to download is tried again after this
 TIMEOUT = (10, 60)  # connect, read
 _TSL_NS = "http://uri.etsi.org/02231/v2#"
 _LOTL = "LOTL"
@@ -106,17 +112,26 @@ def _get(session: requests.Session, url: str) -> str:
 
 
 def download(session: requests.Session | None = None) -> tuple[str, dict[str, str]]:
-    """Fetch the EU list of lists and the lists in TERRITORIES; returns (LOTL XML, {territory: XML}), verified."""
+    """Fetch the EU list of lists and the lists in TERRITORIES; returns (LOTL XML, {territory: XML}), verified.
+
+    A required list that can't be fetched or verified is an error; an optional one is left out."""
     session = session or requests.Session()
     lotl_xml = _get(session, EU_LOTL_LOCATION)
     lotl = eutl_parse.validate_and_parse_lotl(lotl_xml, eutl_parse.latest_known_lotl_tlso_certs())
     lists = {}
     for territory in TERRITORIES:
-        ref = next((r for r in lotl.references if r.territory == territory), None)
-        if ref is None:
-            raise TrustListError(f"L'elenco europeo non indica dove trovare l'elenco {territory}.")
-        lists[territory] = _get(session, ref.location_uri)
-    verify(lotl_xml, lists)
+        try:
+            ref = next((r for r in lotl.references if r.territory == territory), None)
+            if ref is None:
+                raise TrustListError(f"L'elenco europeo non indica dove trovare l'elenco {territory}.")
+            xml = _get(session, ref.location_uri)
+            verify(lotl_xml, {territory: xml})
+        except Exception as exc:
+            if territory in REQUIRED:
+                raise
+            log.warning("elenco %s non disponibile, si continua senza: %s", territory, exc)
+            continue
+        lists[territory] = xml
     return lotl_xml, lists
 
 
@@ -136,10 +151,11 @@ def _load_cached() -> tuple[str, dict[str, str], dt.datetime] | None:
     """(LOTL XML, lists, fetched_at) from the cache, signatures re-verified; None if unusable."""
     try:
         meta = json.loads(_meta_path().read_text())
-        if set(meta["lists"]) != set(TERRITORIES):
+        territories = set(meta["lists"])
+        if not set(REQUIRED) <= territories <= set(TERRITORIES):
             return None
         lotl_xml = (_dir() / f"{_LOTL}.xml").read_text(encoding="utf-8")
-        lists = {t: (_dir() / f"{t}.xml").read_text(encoding="utf-8") for t in TERRITORIES}
+        lists = {t: (_dir() / f"{t}.xml").read_text(encoding="utf-8") for t in sorted(territories)}
         fetched_at = dt.datetime.fromisoformat(meta["fetched_at"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -159,10 +175,16 @@ def cached_date() -> dt.datetime | None:
         return None
 
 
+def _fresh(lists: dict[str, str], fetched_at: dt.datetime, now: dt.datetime) -> bool:
+    """Good enough not to download again: recent, and complete (or the missing lists were tried lately)."""
+    age = now - fetched_at
+    return age < MAX_AGE and (set(lists) == set(TERRITORIES) or age < RETRY_MISSING)
+
+
 def load(allow_network: bool = True, session: requests.Session | None = None) -> TrustList:
     now = dt.datetime.now(dt.timezone.utc)
     cached = _load_cached()
-    if cached and now - cached[2] < MAX_AGE:
+    if cached and _fresh(cached[1], cached[2], now):
         return TrustList(_parse(cached[1]), cached[2], stale=False)
     if allow_network:
         try:
@@ -173,7 +195,7 @@ def load(allow_network: bool = True, session: requests.Session | None = None) ->
         except Exception as exc:  # network, HTTP, or signature problems: fall back to the cache
             log.warning("aggiornamento elenco di fiducia non riuscito: %s", exc)
     if cached:
-        return TrustList(_parse(cached[1]), cached[2], stale=True)
+        return TrustList(_parse(cached[1]), cached[2], stale=now - cached[2] >= MAX_AGE)
     raise TrustListError(
         "Non è stato possibile scaricare l'elenco ufficiale dei certificatori: "
         "controlla la connessione a Internet e riprova."

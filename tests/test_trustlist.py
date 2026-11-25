@@ -41,7 +41,7 @@ def fake_lists(monkeypatch):
 
     def download(session=None):
         downloads.append(1)
-        return "<lotl/>", {"IT": "<lista/>"}
+        return "<lotl/>", {"IT": "<lista/>", "BE": "<lista/>"}
 
     def verify(lotl_xml, lists):
         verified.append((lotl_xml, dict(lists)))
@@ -57,7 +57,7 @@ def fake_lists(monkeypatch):
 
 def test_download_then_cache(fake_lists):
     first = trustlist.load()
-    assert first.registry == "registro:['IT']" and not first.stale
+    assert first.registry == "registro:['BE', 'IT']" and not first.stale
     second = trustlist.load()
     assert len(fake_lists) == 1 and second.fetched_at == first.fetched_at
     assert (trustlist._dir() / "LOTL.xml").read_text() == "<lotl/>"  # the LOTL is cached too, for re-verification
@@ -66,7 +66,8 @@ def test_download_then_cache(fake_lists):
 def test_cache_is_reverified_on_every_load(fake_lists):
     trustlist.load()
     trustlist.load()
-    assert fake_lists.verified == [("<lotl/>", {"IT": "<lista/>"})]  # once per load from the cache (download verifies itself)
+    # once per load from the cache (download verifies itself)
+    assert fake_lists.verified == [("<lotl/>", {"BE": "<lista/>", "IT": "<lista/>"})]
 
 
 def _age_cache(days):
@@ -107,3 +108,57 @@ def test_tampered_cache_is_ignored(fake_lists, tampered, monkeypatch):
     monkeypatch.setattr(trustlist, "download", lambda session=None: (_ for _ in ()).throw(OSError("offline")))
     with pytest.raises(trustlist.TrustListError):
         trustlist.load()
+
+
+def test_missing_optional_list_is_retried_at_most_daily(fake_lists, monkeypatch):
+    """Without the Belgian list Italian signatures are still checked; the download is retried, not every time."""
+    monkeypatch.setattr(trustlist, "download", lambda session=None: (fake_lists.append(1), ("<lotl/>", {"IT": "<lista/>"}))[1])
+    first = trustlist.load()
+    assert first.registry == "registro:['IT']" and not first.stale
+    trustlist.load()
+    assert len(fake_lists) == 1  # incomplete but recent: no new download
+    _age_cache(2)
+    trustlist.load()
+    assert len(fake_lists) == 2  # a day later the missing list is tried again
+
+
+def test_incomplete_cache_used_when_refresh_fails(fake_lists, monkeypatch):
+    monkeypatch.setattr(trustlist, "download", lambda session=None: ("<lotl/>", {"IT": "<lista/>"}))
+    trustlist.load()
+    _age_cache(2)
+    monkeypatch.setattr(trustlist, "download", lambda session=None: (_ for _ in ()).throw(OSError("offline")))
+    loaded = trustlist.load()
+    assert loaded.registry == "registro:['IT']" and not loaded.stale  # two days old: not stale, just without BE
+
+
+def test_cache_without_required_list_is_not_used(fake_lists, monkeypatch):
+    trustlist.load()
+    meta = json.loads(trustlist._meta_path().read_text())
+    meta["lists"] = ["BE"]
+    trustlist._meta_path().write_text(json.dumps(meta))
+    monkeypatch.setattr(trustlist, "download", lambda session=None: (_ for _ in ()).throw(OSError("offline")))
+    with pytest.raises(trustlist.TrustListError):
+        trustlist.load()
+
+
+def test_download_keeps_going_without_an_optional_list(monkeypatch):
+    class Ref:
+        def __init__(self, territory):
+            self.territory, self.location_uri, self.tlso_certs = territory, f"https://tl/{territory}", []
+
+    class Lotl:
+        references = [Ref("IT"), Ref("BE")]
+
+    def get(session, url):
+        if url.endswith("/BE"):
+            raise OSError("irraggiungibile")
+        return "<lotl/>" if url == trustlist.EU_LOTL_LOCATION else "<lista/>"
+
+    monkeypatch.setattr(trustlist, "_get", get)
+    monkeypatch.setattr(trustlist.eutl_parse, "validate_and_parse_lotl", lambda xml, certs: Lotl())
+    monkeypatch.setattr(trustlist, "verify", lambda lotl_xml, lists: None)
+    assert trustlist.download() == ("<lotl/>", {"IT": "<lista/>"})
+    monkeypatch.setattr(trustlist, "_get", lambda session, url: (_ for _ in ()).throw(OSError("giù"))
+                        if url.endswith("/IT") else "<lista/>")
+    with pytest.raises(OSError):
+        trustlist.download()  # the Italian list is required
