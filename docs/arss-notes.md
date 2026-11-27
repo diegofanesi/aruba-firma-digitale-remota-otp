@@ -188,3 +188,15 @@ live 2026-11-25: intact, valid, trusted, revocation checked; HTTPS fails the TLS
 Not yet seen live on real ARSS output: whether ARSS's `.p7m` is DER or BER (asn1crypto re-encodes the
 SignerInfo when the attribute is added; the integrity check guards it) and the document timestamp on
 ARSS's PDFs. Both are covered by the live run with one OTP.
+
+## Accounts with Aruba's automatic timestamp (seen live 2026-11-27)
+A second account (Firma Remota with marks included) gets, from a plain `pkcs7signV2` call
+(`requiredmark=false`, no `tsa_identity`), a **CAdES-LT** envelope: still BER indefinite length, plus a
+signature timestamp from "ArubaPEC Time Stamping Authority EQ A" (qualified), the OCSP responders' and TSA's
+certificates, and **OCSP responses in the SignedData `crls` field** as "other" revocation info with
+`otherRevInfoFormat = id-pkix-ocsp-basic` (1.3.6.1.5.5.7.48.1.1) holding a `BasicOCSPResponse` (not RFC
+5940's id-ri-ocsp-response). asn1crypto can't parse that entry (unknown identifier; once typed, the
+responder's nonce extension doesn't parse either), so a full `.native` parse of the SignedData fails although
+OpenSSL and pyHanko verify the signature. `p7m.parse_fields` therefore parses everything except `crls`
+(optional, not covered by the signature). Answers A0 for such accounts: a plain signature already carries
+Aruba's timestamp, so the free Belgian one is skipped. The PAdES output of such an account is not yet seen.

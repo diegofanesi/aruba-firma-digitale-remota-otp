@@ -13,6 +13,20 @@ from asn1crypto import cms, x509
 from .errors import FileError
 from .models import SignerInfo
 
+# What an envelope's checks rely on, parsed in full when it is read so a damaged file fails then and not
+# later. The revocation data (`crls`) is left out: optional and not covered by the signature. Aruba's
+# envelopes with its own timestamp carry OCSP responses there as "other" revocation info (id-pkix-ocsp-basic,
+# the form ETSI's CAdES uses), which asn1crypto doesn't know and can't parse; an envelope must not be
+# "damaged" because of it (2026-11-27: every .p7m of an account with Aruba's automatic timestamp was refused).
+_PARSED_FIELDS = ("version", "digest_algorithms", "encap_content_info", "certificates", "signer_infos")
+
+
+def parse_fields(signed: cms.SignedData) -> None:
+    """Parse everything in `signed` except its revocation data; raises asn1crypto's errors."""
+    for field in _PARSED_FIELDS:
+        signed[field].native
+
+
 _P7M_SUFFIX = re.compile(r"(\.(p7m|tsd))+$", re.IGNORECASE)  # envelopes a document may be wrapped in
 _PEM = re.compile(rb"-----BEGIN [A-Z0-9 ]+-----(.*?)-----END [A-Z0-9 ]+-----", re.DOTALL)
 _QC_STATEMENTS = "1.3.6.1.5.5.7.1.3"
@@ -47,7 +61,7 @@ def signed_data(data: bytes) -> cms.SignedData:
         if info["content_type"].native != "signed_data":
             raise FileError("Il file .p7m non contiene una firma digitale.")
         signed = info["content"]
-        signed.native  # force a full parse now, so damaged files fail here and not later
+        parse_fields(signed)
         return signed
     except FileError:
         raise

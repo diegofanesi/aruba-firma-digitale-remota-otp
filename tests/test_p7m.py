@@ -3,7 +3,7 @@ import pytest
 from firmaremota import p7m
 from firmaremota.errors import FileError
 
-from .conftest import FIXTURES
+from .conftest import FIXTURES, with_ocsp_in_crls
 
 PDF = b"%PDF-1.7\nfinto pdf\n"
 
@@ -89,3 +89,21 @@ def test_tst_unwrap_mixes_envelopes(make_p7m, make_tsd):
     result = tst.unwrap(make_tsd(make_p7m(make_tsd(PDF))))
     assert result.content == PDF and result.timestamps == 2 and [s.name for layer in result.layers for s in layer] == ["Mario Rossi"]
     assert tst.unwrap(b"ciao") == tst.Unwrapped(b"ciao", [], 0)
+
+
+def test_envelope_with_ocsp_in_its_revocation_data_is_readable(make_p7m):
+    """2026-11-27: envelopes from an account with Aruba's automatic timestamp carry OCSP responses in their
+    revocation data, which asn1crypto can't parse; the full parse refused every one of them as damaged."""
+    from asn1crypto import cms
+
+    data = with_ocsp_in_crls(make_p7m(b"contenuto"))
+    with pytest.raises(ValueError):
+        cms.ContentInfo.load(data)["content"]["crls"].native  # what made the old full parse fail
+    assert p7m.is_p7m(data) and p7m.unwrap(data).content == b"contenuto"
+
+
+def test_envelope_damaged_elsewhere_is_still_refused(make_p7m):
+    data = bytearray(make_p7m(b"contenuto"))
+    at = data.index(b"contenuto")
+    data[at - 2] = 0x05  # the content's OCTET STRING turned into a malformed NULL
+    assert not p7m.is_p7m(bytes(data))

@@ -81,7 +81,7 @@ def _token(info: cms.ContentInfo) -> cms.SignedData:
     if info["content_type"].native != "signed_data":
         raise FileError("La marca temporale non è leggibile.")
     signed = info["content"]
-    signed.native  # a full parse now, so a damaged token fails here
+    p7m.parse_fields(signed)  # a full parse now (revocation data aside), so a damaged token fails here
     return signed
 
 

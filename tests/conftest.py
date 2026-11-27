@@ -245,6 +245,36 @@ def sign_pdf(pki, timestamper):
     return sign
 
 
+OCSP_BASIC = "1.3.6.1.5.5.7.48.1.1"  # id-pkix-ocsp-basic
+
+
+def with_ocsp_in_crls(envelope: bytes) -> bytes:
+    """`envelope` (a .p7m or a timestamp token, DER) with an OCSP response in its revocation data, the way
+    Aruba's envelopes with its own timestamp carry them: "other" revocation info, id-pkix-ocsp-basic, a
+    BasicOCSPResponse. asn1crypto doesn't know that identifier and can't parse the entry; the signature
+    doesn't cover it, so the envelope stays valid."""
+    from asn1crypto import cms, core, ocsp
+
+    basic = ocsp.BasicOCSPResponse({
+        "tbs_response_data": {
+            "responder_id": ocsp.ResponderId(name="by_key", value=b"\x01" * 20),
+            "produced_at": TS_TIME,
+            "responses": [{
+                "cert_id": {"hash_algorithm": {"algorithm": "sha1"}, "issuer_name_hash": b"\x00" * 20,
+                            "issuer_key_hash": b"\x00" * 20, "serial_number": 1},
+                "cert_status": ocsp.CertStatus(name="good", value=core.Null()),
+                "this_update": TS_TIME,
+            }],
+        },
+        "signature_algorithm": {"algorithm": "sha256_rsa"},
+        "signature": b"\x00" * 256,
+    })
+    info = cms.ContentInfo.load(envelope)
+    info["content"]["crls"] = cms.RevocationInfoChoices([cms.RevocationInfoChoice(
+        name="other", value={"other_rev_info_format": OCSP_BASIC, "other_rev_info": core.Any.load(basic.dump())})])
+    return info.dump()
+
+
 @pytest.fixture
 def make_token(timestamper):
     """An RFC 3161 timestamp token (ContentInfo) over `content`, from the test TSA."""

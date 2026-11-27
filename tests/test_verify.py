@@ -7,7 +7,7 @@ from firmaremota import messages, verify
 from firmaremota.errors import FileError, OriginalRequired
 from firmaremota.models import Kind
 
-from .conftest import TS_TIME, asn1_cert, dummy_timestamper
+from .conftest import TS_TIME, asn1_cert, dummy_timestamper, with_ocsp_in_crls
 
 PDF = b"%PDF-1.7\nfinto pdf\n"
 A4 = (595, 842, 0, None)
@@ -572,3 +572,22 @@ def test_restricted_unpickler_refuses_code_objects():
 
 def test_run_isolated_only_raises_firma_errors():
     assert verify.run_isolated(_echo, [1, 2]) == [1, 2]  # lists of builtins still pass
+
+
+def test_p7m_with_ocsp_in_its_revocation_data_verifies(pki, make_cades_t):
+    """As Aruba's envelopes with its own timestamp: signature, timestamp and content all still checked."""
+    data = with_ocsp_in_crls(make_cades_t(PDF))
+    report = verify.verify_bytes("contratto.pdf.p7m", data, RootsTrust(pki["ca"]))
+    (check,) = report.checks
+    assert report.ok and report.content == PDF and check.timestamp is not None and check.timestamp.trusted
+    assert verify.signatures_intact(Kind.CADES, data) and verify.has_timestamp(Kind.CADES, data)
+
+
+def test_timestamp_token_with_revocation_data_is_readable(pki, make_token):
+    from asn1crypto import cms
+
+    from firmaremota import tst
+
+    token = cms.ContentInfo.load(with_ocsp_in_crls(make_token(b"ciao").dump()))
+    report = verify.verify_bytes("nota.txt.tsd", tst.build_tsd(b"ciao", [token]), RootsTrust(pki["ca"]))
+    assert report.kind is Kind.TSD and report.ok and report.content == b"ciao"

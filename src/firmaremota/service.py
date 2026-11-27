@@ -203,8 +203,11 @@ def _sign_one(api: ArssApi, auth: AuthCtx, job: SignJob, out_dir: Path | None, s
         name = files.signed_pdf_name(job.src)
     else:
         signed = api.sign_cades(auth, data)
-        if not p7m.is_p7m(signed):
-            raise ServiceError("Il servizio di firma ha restituito una busta .p7m non valida.")
+        try:
+            p7m.signed_data(signed)
+        except FileError as exc:  # the reason goes to the log: the message alone said nothing on 2026-11-27
+            raise ServiceError("Il servizio di firma ha restituito una busta .p7m non valida.",
+                               detail=exc.detail or exc.message) from None
         name = files.p7m_name(job.src)
     # Never save something that isn't our document, signed: the result must contain exactly the
     # bytes we sent, and its signature(s) must verify cryptographically (no trust or network needed).

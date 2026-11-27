@@ -6,6 +6,7 @@ from firmaremota import config, service, verify
 from firmaremota.errors import CredentialsError, OtpError, ServiceError, TimestampError
 from firmaremota.models import Account, Kind, Position, ResolvedStamp, SignJob, StampSpec, TimestampType, TsaCredentials
 
+from .conftest import with_ocsp_in_crls
 from .fakes import SESSION_ID, FakeArss, signer_info
 
 ACCOUNT = Account("mario.rossi", "firma", "NEW_2025:abc-AS0")
@@ -397,3 +398,19 @@ def test_free_timestamp_excludes_the_aruba_options(docs, make_p7m, free_tsa):
     with pytest.raises(ValueError):
         service.sign_batch(FakeArss(make_p7m=make_p7m), ACCOUNT, "pw", OTP, jobs(docs), free=stamps,
                            level=TimestampType.T)
+
+
+def test_signed_p7m_with_revocation_data_is_saved(docs, make_p7m):
+    """2026-11-27: Aruba's .p7m with OCSP responses in its revocation data was refused as "non valida"."""
+    from firmaremota import p7m
+
+    api = FakeArss(make_p7m=lambda content: with_ocsp_in_crls(make_p7m(content)))
+    (result,) = service.sign_batch(api, ACCOUNT, "pw", OTP, [SignJob(docs / "c.xml", Kind.CADES)])
+    assert result.ok and p7m.unwrap(result.output.read_bytes()).content == b"<fattura/>"
+
+
+def test_unreadable_p7m_from_aruba_keeps_the_reason_for_the_log(docs, caplog):
+    api = FakeArss(make_p7m=lambda content: b"\x30\x03\x02\x01\x00")
+    (result,) = service.sign_batch(api, ACCOUNT, "pw", OTP, [SignJob(docs / "c.xml", Kind.CADES)])
+    assert not result.ok and "busta .p7m non valida" in result.error.message and result.error.detail
+    assert result.error.detail in caplog.text
