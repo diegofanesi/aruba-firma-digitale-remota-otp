@@ -61,7 +61,7 @@ nel menu delle applicazioni. Su KDE Plasma nome utente e password vengono ricord
 Per disinstallare: `sudo pacman -Rs aruba-firma`.
 
 (In alternativa, se qualcuno ti ha dato solo il file `.pkg.tar.zst` senza il resto del
-repository: `sudo pacman -U aruba-firma-0.3.1-1-any.pkg.tar.zst`.)
+repository: `sudo pacman -U aruba-firma-0.3.2-1-any.pkg.tar.zst`.)
 
 ## Uso
 

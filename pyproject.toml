@@ -1,6 +1,6 @@
 [project]
 name = "aruba-firma"
-version = "0.3.1"
+version = "0.3.2"
 description = "Client per la firma digitale remota Aruba (ARSS): riga di comando e interfaccia grafica"
 authors = [{ name = "Diego Fanesi", email = "diego.fanesi@gmail.com" }]
 license = { text = "MIT" }
