@@ -456,3 +456,30 @@ def test_free_timestamp_down_signs_anyway_and_warns(api, configured, tmp_path, m
     assert out.count("SENZA marca temporale") == 2 and len(fake.requests) == 3
     assert "Attenzione: Il servizio gratuito di marca temporale non ha risposto (3 tentativi): 2 documenti" in err
     assert verify.signatures_intact(Kind.PADES, (tmp_path / "a_firmato.pdf").read_bytes())
+
+
+def test_automatic_timestamp_uses_aruba_when_included_and_remembers(api, configured, tmp_path, monkeypatch, capsys,
+                                                                    free_tsa, make_cades_t, make_p7m):
+    from firmaremota import profiles, verify
+    from firmaremota.models import Kind, TimestampSource
+
+    fake = free_tsa()
+    (tmp_path / "f.xml").write_bytes(b"<f/>")
+    (profile,) = profiles.load_all(configured)
+    profiles.upsert(configured, [profile], dataclasses.replace(profile, timestamp=TimestampSource.AUTO))
+    api.make_p7m = make_cades_t  # Aruba timestamps this account's signatures on its own
+    answers(monkeypatch, "12345678")
+    assert cli.main(["p7m", str(tmp_path / "f.xml")]) == 0
+    assert fake.requests == [] and "— con marca temporale" in capsys.readouterr().out
+    assert profiles.load_all(configured)[0].aruba_marks is True
+    api.make_p7m = make_p7m  # it no longer does (a renewal with another product): the free one steps in
+    answers(monkeypatch, "12345678")
+    assert cli.main(["p7m", "--marca-automatica", str(tmp_path / "f.xml")]) == 0
+    assert len(fake.requests) == 1 and verify.has_timestamp(Kind.CADES, (tmp_path / "f (2).xml.p7m").read_bytes())
+    assert profiles.load_all(configured)[0].aruba_marks is False
+
+
+def test_automatic_timestamp_has_only_level_t(api, configured, tmp_path, capsys):
+    (tmp_path / "f.xml").write_bytes(b"<f/>")
+    assert cli.main(["p7m", "--marca-automatica", "--tipo-marca", "LT", str(tmp_path / "f.xml")]) == 2
+    assert "solo con la marca di Aruba" in capsys.readouterr().err and api.calls == []

@@ -3,9 +3,12 @@
 Everything lives in the wallet; nothing is written to disk. Entry names are fixed or random,
 never personal:
 
-    profili         JSON list of {"id", "alias", "login", "marca"} (the value is what the wallet encrypts);
-                    "marca" = who timestamps the signatures: "no" (default), "aruba", "belgio" (the free
-                    Belgian service); older versions stored true/false (true = Aruba)
+    profili         JSON list of {"id", "alias", "login", "marca", "marca_aruba", "schema"} (the value is what
+                    the wallet encrypts); "marca" = who timestamps the signatures: "automatica" (default:
+                    Aruba's when the service includes it, else the free Belgian one), "aruba", "belgio",
+                    "no"; older versions stored true/false (true = Aruba), and before schema 2 "belgio"
+                    meant what "automatica" means now. "marca_aruba" = {"inclusa": bool, "rilevata":
+                    "AAAA-MM-GG"}: whether Aruba's signatures came back with a timestamp on their own
     password:<id>   the password of that profile; absent when the user chose not to remember it
     marca:<id>      JSON {"user", "password", "url"} of a separate time-stamping (TSA) account; absent
                     when the signing credentials themselves are used for timestamps
@@ -16,10 +19,11 @@ profile the first time the list is read.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .credentials import LOGIN_KEY, PASSWORD_KEY, CredentialStoreError, Store, split_login
 from .errors import CredentialsError
@@ -29,6 +33,7 @@ from .models import TimestampSource, TsaCredentials
 log = logging.getLogger("firmaremota.profiles")
 
 INDEX_KEY = "profili"
+SCHEMA = 2  # 2: "automatica" exists, so "belgio" is a deliberate choice
 
 
 @dataclass(frozen=True)
@@ -37,7 +42,9 @@ class Profile:
     alias: str
     user: str
     domain: str
-    timestamp: TimestampSource = TimestampSource.NONE  # off until the user turns it on (as in ArubaSign)
+    timestamp: TimestampSource = TimestampSource.AUTO
+    aruba_marks: bool | None = None  # does the account's service include Aruba's timestamps? None: not seen yet
+    aruba_marks_seen: str | None = None  # ISO date when the current `aruba_marks` value was first seen
 
     @property
     def login(self) -> str:
@@ -53,7 +60,7 @@ class Profile:
 
 
 def new_profile(alias: str, user: str, domain: str, id: str | None = None,
-                timestamp: TimestampSource = TimestampSource.NONE) -> Profile:
+                timestamp: TimestampSource = TimestampSource.AUTO) -> Profile:
     if "@" in user:  # "utente@dominio" typed as the username, the way Aruba's selfcare shows it
         user, domain = split_login(user)
     alias, user, domain = alias.strip(), user.strip(), domain.strip() or "firma"
@@ -89,8 +96,14 @@ def load_all(store: Store) -> list[Profile]:
         profiles = []
         for item in json.loads(raw):
             user, domain = split_login(item["login"])
-            profiles.append(Profile(str(item["id"]), str(item["alias"]), user, domain,
-                                    timestamp_source(item.get("marca"))))
+            source = timestamp_source(item.get("marca"))
+            if source is TimestampSource.BELGIUM and item.get("schema", 1) < 2:
+                source = TimestampSource.AUTO  # what "belgio" did before "automatica" existed
+            marks = item.get("marca_aruba") if isinstance(item.get("marca_aruba"), dict) else {}
+            included = marks.get("inclusa")
+            profiles.append(Profile(str(item["id"]), str(item["alias"]), user, domain, source,
+                                    included if isinstance(included, bool) else None,
+                                    str(marks["rilevata"]) if isinstance(included, bool) and marks.get("rilevata") else None))
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise CredentialStoreError("L'elenco degli account nel portachiavi è danneggiato.", detail=str(exc)) from None
     for profile in profiles:
@@ -98,9 +111,15 @@ def load_all(store: Store) -> list[Profile]:
     return profiles
 
 
+def _item(p: Profile) -> dict:
+    item = {"id": p.id, "alias": p.alias, "login": p.login, "marca": p.timestamp.value, "schema": SCHEMA}
+    if p.aruba_marks is not None:
+        item["marca_aruba"] = {"inclusa": p.aruba_marks, "rilevata": p.aruba_marks_seen}
+    return item
+
+
 def save_all(store: Store, profiles: list[Profile]) -> None:
-    store.set(INDEX_KEY, json.dumps([{"id": p.id, "alias": p.alias, "login": p.login, "marca": p.timestamp.value}
-                                     for p in profiles]))
+    store.set(INDEX_KEY, json.dumps([_item(p) for p in profiles]))
 
 
 def _migrate_legacy(store: Store) -> list[Profile]:
@@ -139,6 +158,17 @@ def upsert(store: Store, profiles: list[Profile], profile: Profile) -> list[Prof
     save_all(store, updated)
     _register(profile)
     return updated
+
+
+def record_aruba_marks(store: Store, profiles: list[Profile], profile: Profile, included: bool,
+                       today: dt.date | None = None) -> list[Profile]:
+    """Remember whether the account's signatures come back from Aruba with a timestamp. Written only when
+    it changes, so the date is when the current answer was first seen."""
+    current = by_id(profiles, profile.id) or profile
+    if current.aruba_marks is included:
+        return profiles
+    updated = replace(current, aruba_marks=included, aruba_marks_seen=(today or dt.date.today()).isoformat())
+    return upsert(store, profiles, updated)
 
 
 def remove(store: Store, profiles: list[Profile], profile: Profile) -> list[Profile]:

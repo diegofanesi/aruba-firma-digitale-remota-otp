@@ -158,9 +158,17 @@ class HomePage(QWidget):
 
 
 SOURCES = {  # the options page's choice, preset from the account
+    TimestampSource.AUTO: "Automatica (consigliata)",
+    TimestampSource.ARUBA: "Solo quella di Aruba",
+    TimestampSource.BELGIUM: "Solo quella gratuita (servizio pubblico belga)",
     TimestampSource.NONE: "Nessuna",
-    TimestampSource.ARUBA: "Di Aruba",
-    TimestampSource.BELGIUM: "Gratuita (servizio pubblico belga)",
+}
+SOURCE_NOTES = {  # under the choice, for the ones that may use the free service
+    TimestampSource.AUTO: "Quella di Aruba se il tuo servizio la include, altrimenti quella gratuita del servizio "
+                          "pubblico belga (qualificata; solo uso non commerciale). Se nessuna è disponibile, il "
+                          "documento viene firmato senza marca e te lo segnaliamo.",
+    TimestampSource.BELGIUM: "Gratuita, dal servizio pubblico belga (qualificata; solo uso non commerciale). Se non "
+                             "risponde, il documento viene firmato senza marca e te lo segnaliamo.",
 }
 
 LEVELS = {  # ArubaSign's "Tipo di marcatura"
@@ -205,8 +213,7 @@ class OptionsPage(QWidget):
         level_row.addWidget(self.level_label)
         level_row.addWidget(self.level, 1)
         layout.addWidget(self.level_row)
-        self.free_note = _label("Gratuita, dal servizio pubblico belga (qualificata; solo uso non commerciale). Se "
-                                "non risponde, il documento viene firmato senza marca e te lo segnaliamo.", "hint")
+        self.free_note = _label("", "hint")
         layout.addWidget(self.free_note)
         self.source.currentIndexChanged.connect(lambda _: self._source_changed())
         self.stamp = QCheckBox("Aggiungi un timbro visibile con la firma")
@@ -257,10 +264,11 @@ class OptionsPage(QWidget):
     def _source_changed(self) -> None:
         source = self.timestamp_source()
         self.level_row.setVisible(source is TimestampSource.ARUBA)  # levels exist only for Aruba's marks
-        self.free_note.setVisible(source is TimestampSource.BELGIUM)
+        self.free_note.setText(SOURCE_NOTES.get(source, ""))
+        self.free_note.setVisible(source in SOURCE_NOTES)
 
     def load(self, settings: config.Settings, paths: list[Path], kind: Kind = Kind.PADES,
-             timestamp: TimestampSource = TimestampSource.NONE, note: str = "") -> None:
+             timestamp: TimestampSource = TimestampSource.AUTO, note: str = "") -> None:
         self.kind = kind
         what = "PDF" if kind is Kind.PADES else "file (.p7m)"
         self.title.setText(f"Firma un {what}" if len(paths) == 1 else f"Firma {len(paths)} {what}")
@@ -512,7 +520,8 @@ class MainWindow(QMainWindow):
         self.pending: dict | None = None  # a signing run between the account check and the OTP
         self.mode = "sign"  # what the result page is about: "sign" or "timestamp"
         self.last_level: TimestampType | None = None
-        self.last_source = TimestampSource.NONE
+        self.last_source = TimestampSource.AUTO
+        self.signing_profile: profiles.Profile | None = None  # the account of the signing in progress
         self.free_tsa_factory = timestamping.FreeTimestamps  # () -> FreeTimestamps; tests swap it
         self.verify_fn = verify.verify_file_isolated  # (path, cancel) -> VerifyReport; tests swap it
         self.preflight_fn = _isolated_preflight  # (jobs, level) -> problems; tests swap it
@@ -575,6 +584,11 @@ class MainWindow(QMainWindow):
         box.setTextFormat(Qt.TextFormat.PlainText)
         box.exec()
 
+    def show_info(self, title: str, text: str) -> None:
+        box = QMessageBox(QMessageBox.Icon.Information, title, text, QMessageBox.StandardButton.Ok, parent=self)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.exec()
+
     def manage_profiles(self) -> None:
         if self.store is None:
             self.show_error("Portachiavi", "Su questo computer non c'è un portachiavi (KWallet o Secret Service): "
@@ -583,6 +597,61 @@ class MainWindow(QMainWindow):
         dialog = ProfilesDialog(self, lambda: self.api, self.store, self.profiles)
         dialog.exec()
         self._set_profiles(dialog.profiles, profiles.by_id(dialog.profiles, self.current.id if self.current else None))
+        if dialog.check_requested is not None:  # "Controlla la marca": needs the OTP flow, which lives here
+            self.check_aruba_marks(profiles.by_id(self.profiles, dialog.check_requested.id) or dialog.check_requested)
+
+    # --- does the account's Aruba service include timestamps? (one OTP, a test text never saved) -------
+
+    def check_aruba_marks(self, profile: profiles.Profile) -> None:
+        try:
+            password = profiles.password(self.store, profile)
+        except credentials.CredentialStoreError as exc:
+            self.show_error("Portachiavi", exc.message)
+            return
+        if not password:
+            answer = self.ask_login(need_user=False, store_name=None, who=profile.alias)
+            if answer is None:
+                return
+            password = answer[1]
+        if not self.confirm_after_failures():
+            return
+        self.mode = "check"
+        self.progress.start("Controllo dell'account con Aruba...", total=None, cancellable=False)
+        self.stack.setCurrentWidget(self.progress)
+        job = worker.Worker(service.prepare_account, self.api, profile.user, profile.domain, password, config.load())
+        worker.start(self, job, lambda result: self._check_marks_account_ready(profile, password, result),
+                     self._check_marks_failed)
+
+    def _check_marks_account_ready(self, profile: profiles.Profile, password: str, result) -> None:
+        account, _ = result
+        otp = self.ask_otp(1, service.auth_failures(), "Per scoprire se il tuo servizio Aruba include la marca "
+                           "temporale firmo un breve testo di prova, che non viene salvato.", profile.alias)
+        if otp is None:
+            self.go_home()
+            return
+        self.progress.start("Controllo della marca temporale...", total=None, cancellable=False)
+        job = worker.Worker(service.check_aruba_marks, self.api, account, password, otp)
+        worker.start(self, job, lambda included: self._check_marks_done(profile, included), self._check_marks_failed)
+
+    def _check_marks_done(self, profile: profiles.Profile, included: bool) -> None:
+        self.go_home()
+        self._record_aruba_marks(profile, included)
+        self.show_info("Marca temporale", messages.aruba_marks_result(profile.alias, included))
+
+    def _check_marks_failed(self, exc: Exception) -> None:
+        self.go_home()
+        self.show_error("Controllo non riuscito", _error_text(exc))
+
+    def _record_aruba_marks(self, profile: profiles.Profile | None, included: bool | None) -> None:
+        if self.store is None or profile is None or included is None:
+            return
+        try:
+            updated = profiles.record_aruba_marks(self.store, self.profiles, profile, included)
+        except credentials.CredentialStoreError as exc:
+            log.warning("rilevamento della marca non salvato: %s", exc.message)
+            return
+        if updated is not self.profiles:
+            self._set_profiles(updated, profiles.by_id(updated, self.current.id if self.current else None))
 
     def add_first_profile(self) -> bool:
         """No account saved yet: add one (checked with Aruba, no OTP). True if one was added."""
@@ -679,7 +748,7 @@ class MainWindow(QMainWindow):
             self.prepare_sign(paths, Kind.CADES)
 
     def timestamp_default(self) -> TimestampSource:
-        return self.current.timestamp if self.current is not None else TimestampSource.NONE
+        return self.current.timestamp if self.current is not None else TimestampSource.AUTO
 
     def prepare_sign(self, paths: list[str], kind: Kind, note: str = "",
                      timestamp: TimestampSource | None = None) -> None:
@@ -801,7 +870,9 @@ class MainWindow(QMainWindow):
         self.cancel_event = threading.Event()
         level = pending["level"]
         tsa = profiles.tsa_credentials(self.store, pending["profile"]) if level else None
-        free = self.free_tsa_factory() if self.last_source is TimestampSource.BELGIUM and not level else None
+        free_sources = (TimestampSource.AUTO, TimestampSource.BELGIUM)  # the free timestamp may be added here
+        free = self.free_tsa_factory() if self.last_source in free_sources and not level else None
+        self.signing_profile = pending["profile"]
         self.progress.start("Firma in corso..." + (" con marca temporale" if level or free else ""), total=len(jobs),
                             cancellable=len(jobs) > 1)
         job = worker.Worker(service.sign_batch, self.api, account, pending["password"], otp, jobs,
@@ -813,6 +884,7 @@ class MainWindow(QMainWindow):
         self.results = results
         self.result.show_results(results)
         self.stack.setCurrentWidget(self.result)
+        self._record_aruba_marks(self.signing_profile, service.aruba_marks_included(results))
         unstamped = sum(1 for r in results if r.ok and r.warning)
         if unstamped:  # the signatures are there and valid; say plainly that the timestamp is missing
             self.show_error("Firmato senza marca temporale", messages.no_free_timestamp(unstamped))

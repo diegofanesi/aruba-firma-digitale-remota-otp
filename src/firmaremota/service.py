@@ -218,6 +218,8 @@ def _sign_one(api: ArssApi, auth: AuthCtx, job: SignJob, out_dir: Path | None, s
     timestamped = verify.has_timestamp(job.kind, signed)
     if auth.level in (TimestampType.T, TimestampType.LT) and not timestamped:
         raise TimestampError(NO_TIMESTAMP.format(name=job.src.name))
+    # Nothing was asked of Aruba: a timestamp in its answer means the account's service includes them.
+    aruba_timestamp = timestamped if auth.level is None and wrap is None else None
     if wrap is not None:  # TSD: the signed envelope itself gets timestamped
         signed, name = _wrapped(api, wrap, signed, job.src.name), files.tsd_name(Path(name))
         timestamped = True
@@ -230,7 +232,7 @@ def _sign_one(api: ArssApi, auth: AuthCtx, job: SignJob, out_dir: Path | None, s
             warning = exc.message
     output = files.write_new(output_dir(job, out_dir), name, signed)
     register_paths(output)
-    return JobResult(job, output=output, timestamped=timestamped, warning=warning)
+    return JobResult(job, output=output, timestamped=timestamped, warning=warning, aruba_timestamp=aruba_timestamp)
 
 
 def _wrapped(api: ArssApi, tsa: TsaCredentials, data: bytes, name: str) -> bytes:
@@ -335,6 +337,36 @@ def sign_batch(
                 log.warning("chiusura della sessione non riuscita: %s", exc.message)
     log.info("firmati %d di %d file", sum(r.ok for r in results), len(jobs))
     return results
+
+
+def aruba_marks_included(results: list[JobResult]) -> bool | None:
+    """What a batch showed about the account: does Aruba timestamp its signatures on its own? None: can't tell
+    (nothing signed, or a timestamp was requested)."""
+    seen = [r.aruba_timestamp for r in results if r.ok and r.aruba_timestamp is not None]
+    return any(seen) if seen else None
+
+
+PROBE = b"aruba-firma: prova per scoprire se il servizio include la marca temporale\n"
+
+
+def check_aruba_marks(api: ArssApi, account: Account, password: str, otp: str) -> bool:
+    """Sign a short text (in memory, never saved) to see whether Aruba timestamps the account's signatures
+    on its own. Spends one OTP; counts towards the refused-login guard like any signature."""
+    register_secret(password, otp)
+    try:
+        signed = api.sign_cades(AuthCtx(account, password, otp), PROBE)
+    except (OtpError, CredentialsError):
+        _record_auth(False)
+        raise
+    _record_auth(True)
+    try:
+        p7m.signed_data(signed)
+    except FileError as exc:
+        raise ServiceError("Il servizio di firma ha restituito una busta .p7m non valida.",
+                           detail=exc.detail or exc.message) from None
+    if not returned_matches(Kind.CADES, PROBE, signed):
+        raise ServiceError(MISMATCH.format(name="il testo di prova"))
+    return verify.has_timestamp(Kind.CADES, signed)
 
 
 def _timestamp_one(api: ArssApi, tsa: TsaCredentials, job: SignJob, out_dir: Path | None) -> Path:

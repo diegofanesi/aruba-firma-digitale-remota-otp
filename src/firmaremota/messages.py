@@ -169,11 +169,20 @@ def trust_list_line(report) -> str:
     return prefix + f"Verifica fatta con l'elenco ufficiale dei certificatori (AgID) aggiornato al {when}."
 
 
-TIMESTAMP_SOURCES = {  # how each choice of the account setting is called, everywhere
-    "no": "nessuna marca temporale",
-    "aruba": "marca temporale di Aruba",
-    "belgio": "marca temporale gratuita (servizio pubblico belga, qualificato; solo uso non commerciale)",
-}
+def aruba_marks_line(profile) -> str:
+    """Whether the account's Aruba service includes timestamps, as far as its signatures have shown."""
+    if profile.aruba_marks is None:
+        return "marca di Aruba inclusa nel servizio: non ancora nota (si saprà alla prima firma)"
+    when = dt.date.fromisoformat(profile.aruba_marks_seen).strftime("%d/%m/%Y") if profile.aruba_marks_seen else "?"
+    return f"marca di Aruba inclusa nel servizio: {'sì' if profile.aruba_marks else 'no'} (rilevato il {when})"
+
+
+def aruba_marks_result(alias: str, included: bool) -> str:
+    if included:
+        return (f"Il servizio Aruba di «{alias}» include la marca temporale: Aruba la mette da sé su ogni firma, "
+                "con l'impostazione automatica non serve altro.")
+    return (f"Il servizio Aruba di «{alias}» non include la marca temporale: con l'impostazione automatica viene "
+            "aggiunta quella gratuita del servizio pubblico belga.")
 
 
 def no_free_timestamp(count: int) -> str:

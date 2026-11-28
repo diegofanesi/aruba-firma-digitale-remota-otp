@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 
-__version__ = "0.3.3"
+__version__ = "0.4.0"
 
 # The Arch package ships the few pure-Python libraries that the official repositories lack
 # (pyHanko and its helpers) in this folder. It goes *after* the normal import path, so a copy

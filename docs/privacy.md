@@ -6,7 +6,8 @@ The app keeps as little as possible: nothing personal is written to disk.
 |---|---|---|
 | Accounts: for each one an alias chosen by the user, username and signing domain | system wallet (KWallet on KDE, otherwise the Secret Service), folder/service `firma-remota`, entry `profili` | one JSON list stored as the entry's encrypted **value**, with the same protection as the passwords (KWallet: Blowfish or GPG; GNOME Keyring: AES-128). The entry name says nothing about the users. |
 | Aruba passwords | same wallet, one entry per account named `password:<random id>` | the wallet's encryption; the id is random, not derived from the username. |
-| Who timestamps an account's signatures: nobody, Aruba, or the free Belgian service | inside the `profili` entry, as `"no"`, `"aruba"` or `"belgio"` | nothing personal. |
+| Who timestamps an account's signatures: automatic (default), Aruba, the free Belgian service, or nobody | inside the `profili` entry, as `"automatica"`, `"aruba"`, `"belgio"` or `"no"` | nothing personal. |
+| Whether the account's Aruba service includes timestamps, as its signatures have shown | inside the `profili` entry: a yes/no and the date it was first seen | nothing personal; learnt from Aruba's answers to signatures the user made (or from the optional check, which signs a fixed test text kept in memory only). |
 | A separate time-stamping (TSA) account, if the user has one | same wallet, entry `marca:<random id>` with user, password and optional server address | the wallet's encryption; absent when the user has none. Never checked with Aruba up front (each check would spend a timestamp). |
 | Remaining timestamps | **nowhere** | ARSS has no way to ask; Aruba's own client doesn't show it either. |
 | Which account was used last | `~/.config/firma-remota/config.ini` | the random id only, never the alias or the username. |
@@ -33,7 +34,8 @@ is then checked by Aruba (`listCert`) and counts as one refused login.
   profile (alias = username) the first time the new version reads the wallet.
 
 ## The free timestamp (Belgian federal service)
-Chosen per account ("Marca temporale gratuita") or with `--marca-gratuita`. After Aruba has signed:
+Used by the automatic setting when Aruba's answer carries no timestamp of its own, or always when chosen
+("Avanzate: solo quella gratuita", `--marca-gratuita`). After Aruba has signed:
 - what leaves the computer is a standard RFC 3161 request: the **SHA-256 of the signature value**
   (`.p7m`) or **of the signed PDF's byte range** (PDF), plus a random nonce. Never the document, a
   file name or anything about the signer. The service (FPS BOSA, `http://tsa.belgium.be/connect`)

@@ -101,14 +101,28 @@ def _credentials(args: argparse.Namespace, settings: config.Settings):
 
 
 def _timestamp_source(args: argparse.Namespace, profile: profiles.Profile | None) -> TimestampSource:
-    """--marca / --marca-gratuita / --senza-marca win; otherwise the account's setting (none for typed logins)."""
+    """--marca-automatica / --marca / --marca-gratuita / --senza-marca win; otherwise the account's setting
+    (automatic for typed logins, as for a new account)."""
     chosen = getattr(args, "marca", None)
     if chosen is not None:
         return TimestampSource(chosen)
-    return profile.timestamp if profile is not None else TimestampSource.NONE
+    return profile.timestamp if profile is not None else TimestampSource.AUTO
 
 
-FREE_ONLY_T = "Con la marca temporale gratuita c'è solo il tipo T (la marca nella firma): togli --tipo-marca."
+FREE_ONLY_T = ("Il tipo di marca (--tipo-marca) si sceglie solo con la marca di Aruba (--marca): con la marca "
+               "automatica o gratuita c'è solo il tipo T (la marca nella firma).")
+FREE_SOURCES = (TimestampSource.AUTO, TimestampSource.BELGIUM)  # the free timestamp may be added here
+
+
+def _remember_aruba_marks(store, profile: profiles.Profile | None, results) -> None:
+    """What this signing showed about the account's service (does Aruba timestamp on its own?), for the settings."""
+    included = service.aruba_marks_included(results)
+    if store is None or profile is None or included is None:
+        return
+    try:
+        profiles.record_aruba_marks(store, profiles.load_all(store), profile, included)
+    except credentials.CredentialStoreError as exc:
+        log.warning("rilevamento della marca non salvato: %s", exc.message)
 
 
 def _remember_profile(settings: config.Settings, profile: profiles.Profile | None) -> None:
@@ -170,18 +184,18 @@ def _sign(args: argparse.Namespace, kind: Kind) -> int:
         print("Nessun file è stato firmato e non è stato usato alcun codice OTP.", file=sys.stderr)
         return EXIT_ERROR
 
-    if getattr(args, "marca", None) == TimestampSource.BELGIUM and args.tipo_marca != "T":
+    if getattr(args, "marca", None) in FREE_SOURCES and args.tipo_marca != "T":
         print(f"Errore: {FREE_ONLY_T}", file=sys.stderr)
         return EXIT_USAGE
     jobs = service.fingerprint(jobs)  # a file that changes from now on is refused at signing time
     user, domain, password, profile, store = _credentials(args, settings)
     source = _timestamp_source(args, profile)
-    if source is TimestampSource.BELGIUM and args.tipo_marca != "T":
+    if source in FREE_SOURCES and args.tipo_marca != "T":
         print(f"Errore: {FREE_ONLY_T}", file=sys.stderr)
         return EXIT_USAGE
     level = TimestampType(args.tipo_marca) if source is TimestampSource.ARUBA else None
     tsa = profiles.tsa_credentials(store, profile) if level else None
-    free = timestamping.FreeTimestamps() if source is TimestampSource.BELGIUM else None
+    free = timestamping.FreeTimestamps() if source in FREE_SOURCES else None
     problem = service.needs_tsa_account(level, tsa)
     if problem:
         raise TimestampError(problem)
@@ -190,12 +204,13 @@ def _sign(args: argparse.Namespace, kind: Kind) -> int:
     account, signer = service.prepare_account(api, user, domain, password, settings)
     _warn_expiry(signer)
     _remember_profile(settings, profile)
-    with_mark = ", con marca temporale" if level else ", con marca temporale gratuita" if free else ""
+    with_mark = ", con marca temporale" if level or free else ""
     if len(jobs) > 1:
         print(f"Firmo {len(jobs)} file con un solo codice OTP{with_mark}.")
     otp = _ask_otp()
     results = service.sign_batch(api, account, password, otp, jobs, out_dir=out_dir, signer_name=signer.name,
                                  progress=_progress, tsa=tsa, level=level, free=free)
+    _remember_aruba_marks(store, profile, results)
     return _report(results, "Firmato", "Non firmato")
 
 
@@ -312,18 +327,21 @@ def _ask_account(default_user: str, default_domain: str) -> tuple[str, str]:
 
 def _needs_profile(args: argparse.Namespace) -> bool:
     return bool(args.rimuovi or args.dimentica_password or args.salva_password or args.marca is not None
-                or args.credenziali_marca or args.dimentica_credenziali_marca)
+                or args.credenziali_marca or args.dimentica_credenziali_marca or args.controlla_marca)
 
 
 def _timestamp_label(store, profile: profiles.Profile) -> str:
-    if profile.timestamp is TimestampSource.BELGIUM:
-        return "marca temporale: gratuita (servizio belga)"
-    if profile.timestamp is TimestampSource.ARUBA:
-        return "marca temporale: Aruba" + (" (account TSA)" if store.get(profile.tsa_key) else "")
-    return "marca temporale: no"
+    names = {TimestampSource.AUTO: "automatica", TimestampSource.BELGIUM: "solo gratuita (servizio belga)",
+             TimestampSource.ARUBA: "solo Aruba" + (" (account TSA)" if store.get(profile.tsa_key) else ""),
+             TimestampSource.NONE: "no"}
+    return f"marca temporale: {names[profile.timestamp]}; {messages.aruba_marks_line(profile)}"
 
 
 SOURCE_SET = {
+    TimestampSource.AUTO: "automatica: la marca di Aruba se il tuo servizio la include, altrimenti quella "
+                          "gratuita del servizio pubblico belga (qualificata eIDAS, valida in tutta l'UE; solo uso "
+                          "non commerciale). Se nessuna delle due è disponibile, il documento viene firmato lo "
+                          "stesso, senza marca, e viene segnalato.",
     TimestampSource.NONE: "nessuna (firme senza marca).",
     TimestampSource.ARUBA: "Aruba (serve un servizio che includa le marche, cioè la «Firma Remota con marcatura "
                            "illimitata» con la marca automatica attiva nel SelfCare, oppure un account TSA).",
@@ -377,6 +395,8 @@ def cmd_configura(args: argparse.Namespace) -> int:
 
     if not sys.stdin.isatty():
         raise FirmaError("'aruba-firma configura' va eseguito in un terminale.")
+    if args.controlla_marca:
+        return _check_aruba_marks(store, available, args, settings)
     if args.credenziali_marca:
         profile = _choose_profile(available, args.account, settings)
         if profile is None:
@@ -414,7 +434,7 @@ def cmd_configura(args: argparse.Namespace) -> int:
     print("Controllo le credenziali con Aruba (non serve il codice OTP)...")
     _, signer = service.prepare_account(api, user, domain, password)
     profile = profiles.new_profile(alias, user, domain, id=editing.id if editing else None,
-                                   timestamp=editing.timestamp if editing else TimestampSource.NONE)
+                                   timestamp=editing.timestamp if editing else TimestampSource.AUTO)
     profiles.upsert(store, available, profile)
     if remember:
         profiles.set_password(store, profile, password)
@@ -430,8 +450,25 @@ def cmd_configura(args: argparse.Namespace) -> int:
     else:
         print(f"Nome utente in {store.name}; la password verrà chiesta a ogni firma.")
     print(f"Marca temporale: {SOURCE_SET[profile.timestamp]}")
-    print("Per cambiarla: aruba-firma configura --marca aruba|belgio|no (belgio = gratuita, dal servizio pubblico "
+    print("Per cambiarla: aruba-firma configura --marca automatica|aruba|belgio|no (belgio = solo gratuita, dal servizio pubblico "
           "belga, solo uso non commerciale).")
+    return EXIT_OK
+
+
+def _check_aruba_marks(store, available, args, settings) -> int:
+    """`configura --controlla-marca`: one OTP, a short test text signed in memory, the answer remembered."""
+    profile = _choose_profile(available, args.account, settings)
+    if profile is None:
+        raise CredentialsError("Nessun account salvato: esegui 'aruba-firma configura' senza opzioni per aggiungerne uno.")
+    print(f"Per scoprire se il servizio Aruba di «{profile.alias}» include la marca temporale firmo un breve testo "
+          "di prova, che non viene salvato. Serve un codice OTP.")
+    password = profiles.password(store, profile) or _typed_password()
+    api = make_api()
+    _confirm_after_failures()
+    account, _ = service.prepare_account(api, profile.user, profile.domain, password, settings)
+    included = service.check_aruba_marks(api, account, password, _ask_otp())
+    profiles.record_aruba_marks(store, profiles.load_all(store), profile, included)
+    print(messages.aruba_marks_result(profile.alias, included))
     return EXIT_OK
 
 
@@ -494,8 +531,11 @@ def _add_output_option(parser: argparse.ArgumentParser, default: str) -> None:
 
 def _add_timestamp_options(parser: argparse.ArgumentParser, levels: list[str]) -> None:
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--marca", dest="marca", action="store_const", const=TimestampSource.ARUBA.value, default=None,
-                       help="aggiunge la marca temporale di Aruba (data certa) alla firma")
+    group.add_argument("--marca-automatica", dest="marca", action="store_const", const=TimestampSource.AUTO.value,
+                       default=None, help="marca temporale di Aruba se il servizio la include, altrimenti gratuita "
+                                          "(l'impostazione predefinita degli account)")
+    group.add_argument("--marca", dest="marca", action="store_const", const=TimestampSource.ARUBA.value,
+                       help="chiede ad Aruba la marca temporale (data certa) sulla firma")
     group.add_argument("--marca-gratuita", dest="marca", action="store_const", const=TimestampSource.BELGIUM.value,
                        help="aggiunge la marca temporale gratuita del servizio pubblico belga (qualificata, solo uso "
                             "non commerciale); se non risponde, il file viene firmato senza marca")
@@ -593,8 +633,12 @@ def build_parser() -> argparse.ArgumentParser:
     only.add_argument("--rimuovi", action="store_true", help="rimuove l'account dal portachiavi")
     only.add_argument("--dimentica-tutto", action="store_true", help="rimuove tutti gli account dal portachiavi")
     only.add_argument("--marca", choices=[s.value for s in TimestampSource],
-                      help="chi mette la marca temporale su tutto ciò che si firma: aruba, belgio (gratuita, servizio "
-                           "pubblico belga qualificato, solo uso non commerciale) oppure no (predefinito)")
+                      help="chi mette la marca temporale su tutto ciò che si firma: automatica (predefinita: quella "
+                           "di Aruba se il servizio la include, altrimenti quella gratuita), aruba, belgio (solo la "
+                           "gratuita, servizio pubblico belga, solo uso non commerciale) oppure no")
+    only.add_argument("--controlla-marca", action="store_true",
+                      help="scopre se il servizio Aruba dell'account include la marca temporale, firmando un breve "
+                           "testo di prova che non viene salvato (serve un codice OTP)")
     only.add_argument("--credenziali-marca", action="store_true",
                       help="salva l'account di marca temporale (TSA) comprato a parte: serve per marcare file senza "
                            "firmarli e per la busta .tsd (le firme usano la marca automatica di Aruba)")

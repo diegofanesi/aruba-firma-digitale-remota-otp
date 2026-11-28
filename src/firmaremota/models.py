@@ -34,9 +34,10 @@ class TimestampSource(StrEnum):
 
     A StrEnum member is always truthy: compare with NONE, never use it as a bool."""
 
-    NONE = "no"
+    AUTO = "automatica"  # Aruba's own when the account's service includes it, otherwise the free one (default)
     ARUBA = "aruba"  # Aruba itself: requiredmark (+ a TSA account if saved), levels T/LT/TSD
     BELGIUM = "belgio"  # the free qualified time-stamping service of the Belgian federal government, added here
+    NONE = "no"
 
 
 class Position(StrEnum):
@@ -114,6 +115,8 @@ class JobResult:
     error: FirmaError | None = None
     timestamped: bool = False  # the saved file carries a timestamp (asked for, or applied by Aruba on its own)
     warning: str | None = None  # saved, but not quite as asked (the free timestamp couldn't be added)
+    aruba_timestamp: bool | None = None  # Aruba's own answer carried a timestamp nobody asked for (None: not
+    #                                     applicable, e.g. one was requested); tells whether the service includes them
 
     @property
     def ok(self) -> bool:

@@ -104,16 +104,19 @@ def test_timestamp_source_roundtrip_and_default():
                                                             timestamp=TimestampSource.BELGIUM))
     saved = profiles.upsert(store, saved, profiles.new_profile("Anna", "anna", "firma"))
     saved = profiles.upsert(store, saved, profiles.new_profile("Ugo", "ugo", "firma", timestamp=TimestampSource.ARUBA))
+    saved = profiles.upsert(store, saved, profiles.new_profile("Ada", "ada", "firma", timestamp=TimestampSource.NONE))
     assert [p.timestamp for p in profiles.load_all(store)] == [
-        TimestampSource.BELGIUM, TimestampSource.NONE, TimestampSource.ARUBA]
-    assert [item["marca"] for item in json.loads(store.data[profiles.INDEX_KEY])] == ["belgio", "no", "aruba"]
+        TimestampSource.BELGIUM, TimestampSource.AUTO, TimestampSource.ARUBA, TimestampSource.NONE]  # new: automatic
+    items = json.loads(store.data[profiles.INDEX_KEY])
+    assert [item["marca"] for item in items] == ["belgio", "automatica", "aruba", "no"]
+    assert {item["schema"] for item in items} == {2}
 
 
 @pytest.mark.parametrize("stored, expected", [
     (True, TimestampSource.ARUBA),  # older versions: "Marca sempre" on meant Aruba
     (False, TimestampSource.NONE),
     (None, TimestampSource.NONE),
-    ("belgio", TimestampSource.BELGIUM),
+    ("belgio", TimestampSource.AUTO),  # before "automatica" existed, "belgio" behaved exactly like it
     ("qualcosa", TimestampSource.NONE),  # unknown (a newer version?): no timestamp rather than a guess
     (7, TimestampSource.NONE),
 ])
@@ -184,3 +187,29 @@ def test_tsa_password_is_a_secret_for_the_log():
     logsetup._replacements.clear()
     profiles.set_tsa(store, p, TsaCredentials("tsa-user", "Segreto-TSA"))
     assert "Segreto-TSA" not in logsetup.redact("pw Segreto-TSA") and "Segreto-TSA" not in repr(profiles.tsa_account(store, p))
+
+
+def test_belgio_chosen_after_automatica_existed_stays_manual():
+    store = MemoryStore()
+    store.data[profiles.INDEX_KEY] = json.dumps([{"id": "a1", "alias": "A", "login": "x@firma", "marca": "belgio",
+                                                  "schema": 2}])
+    assert profiles.load_all(store)[0].timestamp is TimestampSource.BELGIUM
+
+
+def test_aruba_marks_are_recorded_only_when_they_change():
+    import datetime as dt
+
+    store = MemoryStore()
+    saved = profiles.upsert(store, [], profiles.new_profile("Papà", "giorgio.verdi", "firma"))
+    (papa,) = saved
+    assert papa.aruba_marks is None and papa.aruba_marks_seen is None
+    saved = profiles.record_aruba_marks(store, saved, papa, True, today=dt.date(2026, 11, 27))
+    writes = store.data[profiles.INDEX_KEY]
+    again = profiles.record_aruba_marks(store, saved, papa, True, today=dt.date(2026, 12, 1))
+    assert again is saved and store.data[profiles.INDEX_KEY] == writes  # unchanged: no write, first date kept
+    (loaded,) = profiles.load_all(store)
+    assert (loaded.aruba_marks, loaded.aruba_marks_seen) == (True, "2026-11-27")
+    profiles.record_aruba_marks(store, profiles.load_all(store), loaded, False, today=dt.date(2027, 3, 2))
+    (changed,) = profiles.load_all(store)  # e.g. a renewal with another product, or the included marks ran out
+    assert (changed.aruba_marks, changed.aruba_marks_seen) == (False, "2027-03-02")
+    assert json.loads(store.data[profiles.INDEX_KEY])[0]["marca_aruba"] == {"inclusa": False, "rilevata": "2027-03-02"}

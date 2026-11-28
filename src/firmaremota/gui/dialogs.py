@@ -8,11 +8,11 @@ import re
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLayout,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLayout,
     QLineEdit, QListWidget, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
-from .. import credentials, profiles, service
+from .. import credentials, messages, profiles, service
 from ..errors import FirmaError
 from ..models import TimestampSource, TsaCredentials
 from . import worker
@@ -23,17 +23,31 @@ TSR_NOTE = ("Con il formato TSR la marca è un file separato: se la mandi a qual
 WARNING_STYLE = "color: #b3261e; font-weight: bold;"
 NOTE_STYLE = "color: #555;"
 
-# The account's "Marca temporale" setting: (radio text, explanation under it). The explanations break lines
-# by hand: word-wrapped labels inside a group box get clipped when the dialog sizes itself.
-TIMESTAMP_CHOICES = {
-    TimestampSource.NONE: ("Nessuna marca temporale", ""),
-    TimestampSource.ARUBA: ("Marca temporale di Aruba",
-                            "Serve la «Marca automatica» attiva nel SelfCare o un account TSA comprato a parte."),
-    TimestampSource.BELGIUM: ("Marca temporale gratuita (servizio pubblico belga)",
-                              "Qualificata, valida in tutta l'UE; solo per uso non commerciale. Se non risponde,\n"
-                              "il documento viene firmato lo stesso, senza marca, e te lo segnaliamo."),
+# The account's "Marca temporale" setting: "Automatica" (recommended), or one of the manual choices for
+# advanced users, picked from a list on a single row (the dialog must fit a 1366x768 screen). The explanation
+# breaks lines by hand: word-wrapped labels inside a group box get clipped when the dialog sizes itself.
+AUTO_NOTE = ("Quella di Aruba se il tuo servizio la include, altrimenti quella gratuita del servizio pubblico\n"
+             "belga (qualificata, valida in tutta l'UE; solo uso non commerciale). Non serve sapere cosa hai comprato.")
+MANUAL_CHOICES = {
+    TimestampSource.ARUBA: "solo quella di Aruba (inclusa nel servizio, o account TSA comprato a parte)",
+    TimestampSource.BELGIUM: "solo quella gratuita (servizio pubblico belga, solo uso non commerciale)",
+    TimestampSource.NONE: "nessuna marca temporale",
 }
-ACCOUNT_MARKS = {TimestampSource.ARUBA: "  (marca di Aruba)", TimestampSource.BELGIUM: "  (marca gratuita)"}
+ACCOUNT_MARKS = {TimestampSource.AUTO: "marca automatica", TimestampSource.ARUBA: "solo marca di Aruba",
+                 TimestampSource.BELGIUM: "solo marca gratuita", TimestampSource.NONE: "senza marca"}
+
+
+def account_marks_text(profile: profiles.Profile) -> str:
+    """The account list's note: the setting, and what its signatures showed about Aruba's timestamps."""
+    if profile.aruba_marks is None:
+        return f"  ({ACCOUNT_MARKS[profile.timestamp]})"
+    included = "inclusa nel servizio" if profile.aruba_marks else "non inclusa nel servizio"
+    return f"  ({ACCOUNT_MARKS[profile.timestamp]}; marca di Aruba {included})"
+
+
+def _sentence(text: str) -> str:
+    """'marca di Aruba …' -> 'Marca di Aruba ….' (str.capitalize would also lower 'Aruba')."""
+    return text[:1].upper() + text[1:] + "."
 
 
 def _label(text: str, *, wrap: bool = True, style: str = "", rich: bool = False) -> QLabel:
@@ -182,22 +196,33 @@ class ProfileEditDialog(QDialog):
         group = QGroupBox("Marca temporale sulle firme (data certa)")
         box = QVBoxLayout(group)
         self.timestamp_group = QButtonGroup(self)
-        self.timestamp_buttons: dict[TimestampSource, QRadioButton] = {}
-        current = profile.timestamp if profile else TimestampSource.NONE
-        for source, (text, note) in TIMESTAMP_CHOICES.items():
-            radio = QRadioButton(text)
-            radio.setChecked(source is current)
-            self.timestamp_group.addButton(radio)
-            self.timestamp_buttons[source] = radio
-            box.addWidget(radio)
-            if note:
-                explanation = _label(note, wrap=False, style=NOTE_STYLE)
-                explanation.setContentsMargins(28, 0, 0, 6)
-                box.addWidget(explanation)
+        self.auto_radio = QRadioButton("Automatica (consigliata)")
+        self.timestamp_group.addButton(self.auto_radio)
+        box.addWidget(self.auto_radio)
+        explanation = _label(AUTO_NOTE, wrap=False, style=NOTE_STYLE)
+        explanation.setContentsMargins(28, 0, 0, 0)
+        box.addWidget(explanation)
+        self.marks_status = _label(_sentence(messages.aruba_marks_line(profile)) if profile else
+                                   "Se il tuo servizio include la marca di Aruba lo scopriremo alla prima firma.",
+                                   wrap=False, style=NOTE_STYLE)
+        self.marks_status.setContentsMargins(28, 0, 0, 6)
+        box.addWidget(self.marks_status)
+        manual_row = QHBoxLayout()
+        self.manual_radio = QRadioButton("Avanzate:")
+        self.timestamp_group.addButton(self.manual_radio)
+        self.manual_choice = QComboBox()
+        for source, text in MANUAL_CHOICES.items():
+            self.manual_choice.addItem(text, source.value)
+        manual_row.addWidget(self.manual_radio)
+        manual_row.addWidget(self.manual_choice, 1)
+        box.addLayout(manual_row)
         saved_tsa = profiles.tsa_account(store, profile) if profile else None
         self.tsa_separate = QCheckBox("Ho un account di marca temporale (TSA) comprato a parte")
         self.tsa_separate.setChecked(saved_tsa is not None)
         box.addWidget(self.tsa_separate)
+        self.set_timestamp_choice(profile.timestamp if profile else TimestampSource.AUTO)
+        self.manual_radio.toggled.connect(lambda _: self._timestamp_changed())
+        self.manual_choice.currentIndexChanged.connect(lambda _: self._timestamp_changed())
         self.tsa_fields = QWidget()  # shown only for a TSA account: most people have none, and the dialog must
         tsa_form = QFormLayout(self.tsa_fields)  # fit a 1366x768 screen
         tsa_form.setContentsMargins(0, 0, 0, 0)
@@ -212,13 +237,13 @@ class ProfileEditDialog(QDialog):
         tsa_form.addRow("Password TSA:", self.tsa_password)
         tsa_form.addRow("Indirizzo server:", self.tsa_url)
         box.addWidget(self.tsa_fields)
-        self.tsa_fields.setVisible(self.tsa_separate.isChecked())
-        self.tsa_separate.toggled.connect(self.tsa_fields.setVisible)
+        self.tsa_separate.toggled.connect(lambda _: self._timestamp_changed())
         for field in (self.tsa_user, self.tsa_password, self.tsa_url):
             field.setEnabled(self.tsa_separate.isChecked())
             self.tsa_separate.toggled.connect(field.setEnabled)
         layout.addWidget(group)
         self.saved_tsa = saved_tsa
+        self._timestamp_changed()
         self.status = _label("")
         layout.addWidget(self.status)
         row = QHBoxLayout()
@@ -243,7 +268,7 @@ class ProfileEditDialog(QDialog):
 
     def _set_busy(self, busy: bool, message: str = "", style: str = "") -> None:
         for widget in (self.alias, self.user, self.domain, self.password, self.remember, self.check, self.cancel,
-                       *self.timestamp_buttons.values(), self.tsa_separate):
+                       self.auto_radio, self.manual_radio, self.manual_choice, self.tsa_separate):
             widget.setEnabled(not busy)
         for field in (self.tsa_user, self.tsa_password, self.tsa_url):
             field.setEnabled(not busy and self.tsa_separate.isChecked())
@@ -274,7 +299,24 @@ class ProfileEditDialog(QDialog):
         worker.start(self, job, lambda result: self._checked(profile, password), self._failed)
 
     def timestamp_choice(self) -> TimestampSource:
-        return next((s for s, radio in self.timestamp_buttons.items() if radio.isChecked()), TimestampSource.NONE)
+        if self.auto_radio.isChecked():
+            return TimestampSource.AUTO
+        return TimestampSource(self.manual_choice.currentData())
+
+    def set_timestamp_choice(self, source: TimestampSource) -> None:
+        if source is TimestampSource.AUTO:
+            self.auto_radio.setChecked(True)
+            return
+        self.manual_radio.setChecked(True)
+        self.manual_choice.setCurrentIndex(self.manual_choice.findData(source.value))
+
+    def _timestamp_changed(self) -> None:
+        """The list is usable only with "Avanzate"; the TSA account only matters for Aruba's own marks (or
+        when one is already saved, so it can be seen and removed)."""
+        self.manual_choice.setEnabled(self.manual_radio.isChecked())
+        relevant = self.timestamp_choice() is TimestampSource.ARUBA or self.saved_tsa is not None
+        self.tsa_separate.setVisible(relevant)
+        self.tsa_fields.setVisible(relevant and self.tsa_separate.isChecked())
 
     def _failed(self, exc: Exception) -> None:
         message = exc.message if isinstance(exc, FirmaError) else f"Errore imprevisto: {exc}"
@@ -317,8 +359,9 @@ class ProfilesDialog(QDialog):
         super().__init__(parent)
         self.api_factory, self.store = api_factory, store
         self.profiles = list(existing)
+        self.check_requested: profiles.Profile | None = None  # "Controlla la marca": the window runs it after closing
         self.setWindowTitle("Account")
-        self.setMinimumSize(720, 480)
+        self.setMinimumSize(960, 480)  # six buttons in a row, and the timestamp notes on each line
         layout = QVBoxLayout(self)
         layout.addWidget(_label("Gli account di firma salvati su questo computer. Nome utente e password stanno "
                                 f"in {store.name}; sul disco non viene salvato nulla."))
@@ -332,11 +375,15 @@ class ProfilesDialog(QDialog):
         self.edit_button = QPushButton("Modifica")
         self.remove_button = QPushButton("Rimuovi")
         self.forget_button = QPushButton("Dimentica la password")
+        self.check_button = QPushButton("Controlla la marca")
+        self.check_button.setToolTip("Scopre se il servizio Aruba dell'account include la marca temporale: firma un "
+                                     "breve testo di prova, che non viene salvato (serve un codice OTP).")
+        self.check_button.clicked.connect(self.check_marks)
         self.add_button.clicked.connect(self.add)
         self.edit_button.clicked.connect(self.edit)
         self.remove_button.clicked.connect(self.remove)
         self.forget_button.clicked.connect(self.forget_password)
-        for button in (self.add_button, self.edit_button, self.remove_button, self.forget_button):
+        for button in (self.add_button, self.edit_button, self.remove_button, self.forget_button, self.check_button):
             row.addWidget(button)
         row.addStretch()
         close = QPushButton("Chiudi")
@@ -350,7 +397,7 @@ class ProfilesDialog(QDialog):
         self.list.clear()
         for profile in self.profiles:
             saved = "" if profiles.password(self.store, profile) else "  (password non salvata)"
-            mark = ACCOUNT_MARKS.get(profile.timestamp, "")
+            mark = account_marks_text(profile)
             self.list.addItem(f"{profile.alias}  —  {profile.login}{saved}{mark}")
         if self.profiles:
             self.list.setCurrentRow(self.profiles.index(select) if select in self.profiles else 0)
@@ -358,7 +405,7 @@ class ProfilesDialog(QDialog):
 
     def _update_buttons(self) -> None:
         enabled = self.selected() is not None
-        for button in (self.edit_button, self.remove_button, self.forget_button):
+        for button in (self.edit_button, self.remove_button, self.forget_button, self.check_button):
             button.setEnabled(enabled)
 
     def selected(self) -> profiles.Profile | None:
@@ -396,6 +443,11 @@ class ProfilesDialog(QDialog):
             return
         self.refresh()
         self.status.setText(f"Account «{profile.alias}» rimosso.")
+
+    def check_marks(self) -> None:
+        self.check_requested = self.selected()
+        if self.check_requested is not None:
+            self.accept()
 
     def forget_password(self) -> None:
         profile = self.selected()

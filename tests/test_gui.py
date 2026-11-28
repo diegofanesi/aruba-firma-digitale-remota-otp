@@ -58,6 +58,7 @@ def window(qtbot, store, api):
     qtbot.addWidget(w)
     w.ask_otp = Recorder("12345678")
     w.show_error = Recorder()
+    w.show_info = Recorder()
     w.open_url = Recorder()
     w.ask_login = Recorder(None)
     # In-process instead of a spawned process: the tests' monkeypatched trust must stay visible.
@@ -671,7 +672,7 @@ def test_profile_dialog_timestamp_settings(qtbot, store, api):
     assert "account TSA" in dialog.status.text() and api.calls == []
     dialog.tsa_user.setText("tsa-user")
     dialog.tsa_password.setText("tsa-pw")
-    dialog.timestamp_buttons[TimestampSource.ARUBA].setChecked(True)
+    dialog.set_timestamp_choice(TimestampSource.ARUBA)
     dialog.check.click()
     qtbot.waitUntil(lambda: dialog.result() == QDialog.DialogCode.Accepted, timeout=10000)
     saved = profiles.load_all(store)[0]
@@ -688,10 +689,14 @@ def test_profile_dialog_timestamp_settings(qtbot, store, api):
 def test_profiles_dialog_marks_accounts_with_timestamp(qtbot, store, api):
     add_profile(store, "Anna", "anna.bianchi@firma", "pw", timestamp=True)
     add_profile(store, "Ugo", "ugo@firma", "pw", timestamp=TimestampSource.BELGIUM)
+    add_profile(store, "Papà", "giorgio.verdi@firma", "pw", timestamp=TimestampSource.AUTO)
+    (*_, papa) = profiles.load_all(store)
+    profiles.record_aruba_marks(store, profiles.load_all(store), papa, True)
     dialog = ProfilesDialog(None, lambda: api, store, profiles.load_all(store))
     qtbot.addWidget(dialog)
-    texts = [dialog.list.item(i).text() for i in range(3)]
-    assert "marca" not in texts[0] and "(marca di Aruba)" in texts[1] and "(marca gratuita)" in texts[2]
+    texts = [dialog.list.item(i).text() for i in range(4)]
+    assert "(senza marca)" in texts[0] and "(solo marca di Aruba)" in texts[1] and "(solo marca gratuita)" in texts[2]
+    assert "(marca automatica; marca di Aruba inclusa nel servizio)" in texts[3]
 
 
 # --- the free (Belgian) timestamp --------------------------------------------------------------------
@@ -760,7 +765,7 @@ def test_profile_dialog_saves_each_timestamp_choice(qtbot, store, api):
         current = profiles.load_all(store)[0]
         dialog = ProfileEditDialog(None, lambda: api, store, [current], current)
         qtbot.addWidget(dialog)
-        dialog.timestamp_buttons[source].setChecked(True)
+        dialog.set_timestamp_choice(source)
         dialog.check.click()
         qtbot.waitUntil(lambda d=dialog: d.result() == QDialog.DialogCode.Accepted, timeout=10000)
         saved = profiles.load_all(store)[0]
@@ -782,3 +787,64 @@ def test_labels_never_render_html(window, qtbot, tmp_path, make_p7m, pki, monkey
     assert "NON valida" in window.verify_page.title.text()
     rich = [w for w in window.findChildren(QLabel) if w.textFormat() == Qt.TextFormat.RichText]
     assert rich == []  # only the OTP/login dialogs use rich text, with escaped values
+
+
+
+# --- automatic timestamp: Aruba's own if included, else the free one ------------------------------------
+
+def test_new_account_defaults_to_automatic_and_offers_the_manual_choices(qtbot, store, api):
+    dialog = ProfileEditDialog(None, lambda: api, store, [])
+    qtbot.addWidget(dialog)
+    assert dialog.timestamp_choice() is TimestampSource.AUTO
+    choices = [dialog.manual_choice.itemData(i) for i in range(dialog.manual_choice.count())]
+    assert choices == ["aruba", "belgio", "no"] and not dialog.manual_choice.isEnabled()  # advanced: on one row
+    assert not dialog.tsa_separate.isVisibleTo(dialog)  # the TSA account only matters for Aruba's own marks
+    dialog.set_timestamp_choice(TimestampSource.ARUBA)
+    assert dialog.manual_choice.isEnabled() and dialog.tsa_separate.isVisibleTo(dialog)
+    dialog.set_timestamp_choice(TimestampSource.BELGIUM)
+    assert dialog.timestamp_choice() is TimestampSource.BELGIUM and not dialog.tsa_separate.isVisibleTo(dialog)
+    assert "prima firma" in dialog.marks_status.text()
+
+
+def test_signing_records_whether_aruba_includes_timestamps(window, api, qtbot, store, tmp_path, make_cades_t, free_tsa):
+    import dataclasses
+
+    fake = free_tsa()
+    api.make_p7m = make_cades_t  # this account's Aruba service timestamps on its own
+    (profile,) = profiles.load_all(store)
+    profiles.upsert(store, [profile], dataclasses.replace(profile, timestamp=TimestampSource.AUTO))
+    window._load_profiles()
+    (tmp_path / "f.xml").write_bytes(b"<f/>")
+    window.choose_files = Recorder([str(tmp_path / "f.xml")])
+    window.home.sign_other.click()
+    assert window.options.timestamp_source() is TimestampSource.AUTO and window.options.free_note.isVisibleTo(window)
+    assert not window.options.level_row.isVisibleTo(window)
+    window.options.sign.click()
+    wait_for(qtbot, window, window.result)
+    assert window.result.title.text() == "Fatto! Documento firmato e marcato temporalmente."
+    assert fake.requests == []  # Aruba's own timestamp: the free service is not contacted
+    (saved,) = profiles.load_all(store)
+    assert saved.aruba_marks is True and window.current.aruba_marks is True
+
+
+def test_check_button_signs_a_test_text_and_tells_the_answer(window, api, qtbot, store, make_p7m):
+    from firmaremota.gui.dialogs import ProfilesDialog as Dialog
+
+    api.make_p7m = make_p7m  # no timestamp of Aruba's own
+    original_exec = Dialog.exec
+
+    def press_check(self):
+        self.list.setCurrentRow(0)
+        self.check_button.click()
+        return self.result()
+
+    Dialog.exec = press_check
+    try:
+        window.home.settings.click()
+    finally:
+        Dialog.exec = original_exec
+    qtbot.waitUntil(lambda: bool(window.show_info.calls), timeout=10000)
+    title, text = window.show_info.calls[-1]
+    assert "non include la marca temporale" in text and len(window.ask_otp.calls) == 1
+    assert [name for name, *_ in api.calls] == ["list_certs", "sign_cades"]
+    assert profiles.load_all(store)[0].aruba_marks is False

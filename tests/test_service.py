@@ -414,3 +414,29 @@ def test_unreadable_p7m_from_aruba_keeps_the_reason_for_the_log(docs, caplog):
     (result,) = service.sign_batch(api, ACCOUNT, "pw", OTP, [SignJob(docs / "c.xml", Kind.CADES)])
     assert not result.ok and "busta .p7m non valida" in result.error.message and result.error.detail
     assert result.error.detail in caplog.text
+
+
+def test_signatures_tell_whether_aruba_includes_timestamps(docs, make_p7m, make_cades_t, sign_pdf):
+    plain = service.sign_batch(FakeArss(make_p7m=make_p7m, sign_pdf=sign_pdf), ACCOUNT, "pw", OTP, jobs(docs))
+    assert [r.aruba_timestamp for r in plain] == [False] * 3 and service.aruba_marks_included(plain) is False
+    included = service.sign_batch(FakeArss(make_p7m=make_cades_t, sign_pdf=lambda pdf: sign_pdf(pdf, timestamp=True)),
+                                  ACCOUNT, "pw", OTP, jobs(docs))
+    assert service.aruba_marks_included(included) is True
+    asked = service.sign_batch(FakeArss(make_p7m=make_p7m, make_cades_t=make_cades_t, sign_pdf=sign_pdf), ACCOUNT, "pw",
+                               OTP, [SignJob(docs / "c.xml", Kind.CADES)], level=TimestampType.T)
+    assert asked[0].aruba_timestamp is None and service.aruba_marks_included(asked) is None  # asked for: proves nothing
+    assert service.aruba_marks_included([]) is None
+
+
+@pytest.mark.parametrize("included", [True, False])
+def test_check_aruba_marks_signs_a_test_text(make_p7m, make_cades_t, included):
+    api = FakeArss(make_p7m=make_cades_t if included else make_p7m)
+    assert service.check_aruba_marks(api, ACCOUNT, "pw", OTP) is included
+    assert api.calls == [("sign_cades", OTP, None)] and service.auth_failures() == 0
+
+
+def test_check_aruba_marks_refused_otp_counts(make_p7m):
+    api = FakeArss(make_p7m=make_p7m, fail_at={0: OtpError("codice errato")})
+    with pytest.raises(OtpError):
+        service.check_aruba_marks(api, ACCOUNT, "pw", OTP)
+    assert service.auth_failures() == 1
