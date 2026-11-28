@@ -132,14 +132,19 @@ class SignerInfo:
     qualified: bool
 
 
-def _verdict(intact: bool, valid: bool, trusted: bool, trust_checked: bool, revocation_checked: bool) -> str:
-    """'valida', 'non valida', or 'non verificabile' (sound, but trust or revocation unknown)."""
+def _verdict(intact: bool, valid: bool, trusted: bool, trust_checked: bool, revocation_checked: bool,
+             unknown_issuer: bool = False) -> str:
+    """'valida', 'non valida', or 'non verificabile' (sound, but trust or revocation unknown).
+
+    A sound signature whose certificate leads to no authority on the trusted list (an organisation's own
+    CA, say) is 'non verificabile', as ETSI EN 319 102-1 has it (INDETERMINATE, NO_CERTIFICATE_CHAIN_FOUND):
+    the document is unaltered, but who signed can't be confirmed. Expired or revoked: 'non valida'."""
     if not (intact and valid):
         return "non valida"
     if not trust_checked:
         return "non verificabile"
     if not trusted:
-        return "non valida"
+        return "non verificabile" if unknown_issuer else "non valida"
     return "valida" if revocation_checked else "non verificabile"
 
 
@@ -155,10 +160,12 @@ class TimestampInfo:
     qualified: bool | None  # a qualified time-stamping service (QTST) per the trusted list; None = can't tell
     trust_checked: bool = True
     revocation_checked: bool = True
+    unknown_issuer: bool = False  # the TSA's certificate leads to no authority on the trusted list
 
     @property
     def verdict(self) -> str:
-        return _verdict(self.intact, self.valid, self.trusted, self.trust_checked, self.revocation_checked)
+        return _verdict(self.intact, self.valid, self.trusted, self.trust_checked, self.revocation_checked,
+                        self.unknown_issuer)
 
     @property
     def usable(self) -> bool:
@@ -182,13 +189,15 @@ class SignatureCheck:
     timestamp: TimestampInfo | None = None  # the signature's own timestamp, if any
     valid_at: dt.datetime | None = None  # set when trust was established at a timestamp's time, not now
     revoked_after_poe: bool = False  # the certificate was revoked, but after the timestamp: the signature stands
+    unknown_issuer: bool = False  # the certificate leads to no authority on the trusted list (see _verdict)
 
     @property
     def verdict(self) -> str:
         """'valida', 'non valida', or 'non verificabile' (sound, but trust or revocation unknown)."""
         if not self.covers_document or self.revoked:
             return "non valida"
-        return _verdict(self.intact, self.valid, self.trusted, self.trust_checked, self.revocation_checked)
+        return _verdict(self.intact, self.valid, self.trusted, self.trust_checked, self.revocation_checked,
+                        self.unknown_issuer)
 
     @property
     def ok(self) -> bool:

@@ -92,11 +92,19 @@ def check_lines(check) -> list[str]:
     elif not check.trust_checked:
         lines.append("Non verificabile: l'elenco ufficiale dei certificatori non è disponibile, quindi non si "
                      "può sapere se il certificato è di un certificatore riconosciuto.")
+    elif not check.trusted and check.unknown_issuer:
+        lines.append(f"Il documento non è stato modificato dopo la firma, ma il certificato è stato emesso da "
+                     f"«{s.issuer}», che non fa capo a nessun certificatore dell'elenco ufficiale europeo: non "
+                     "è una firma digitale qualificata e non si può confermare chi ha firmato. Può essere il "
+                     "certificato interno di un ente (per esempio il sigillo di un portale pubblico).")
+        if s.not_after < dt.datetime.now(dt.timezone.utc):
+            lines.append(f"Il certificato è inoltre scaduto il {_date(s.not_after)}.")
     elif not check.trusted:
         if s.not_after < dt.datetime.now(dt.timezone.utc):
             lines.append(f"Problema: il certificato del firmatario è scaduto il {_date(s.not_after)}.")
         else:
-            lines.append("Problema: il certificato non risulta emesso da un certificatore riconosciuto.")
+            lines.append("Problema: il certificato del firmatario non supera i controlli dell'elenco ufficiale "
+                         "(non valido per firmare, o non valido un certificato della sua catena).")
     if not check.covers_document:
         lines.append("Problema: il PDF è stato modificato dopo questa firma in modo non consentito.")
     if check.trust_checked and check.trusted and not check.revocation_checked:
@@ -133,8 +141,10 @@ def timestamp_line(info, label: str = "Marca temporale") -> str:
         return line + " — NON VALIDA: non corrisponde ai dati a cui è associata."
     if not info.trust_checked:
         return line + " — non verificabile: elenco dei certificatori non disponibile."
-    if not info.trusted:
+    if not info.trusted and info.unknown_issuer:
         return line + " — NON riconosciuta: l'autorità non è nell'elenco ufficiale, non vale come riferimento temporale."
+    if not info.trusted:
+        return line + " — NON VALIDA: il certificato dell'autorità non supera i controlli dell'elenco ufficiale."
     if info.qualified is True:
         line += " — qualificata"
     elif info.qualified is False:

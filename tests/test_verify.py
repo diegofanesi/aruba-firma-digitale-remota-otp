@@ -57,11 +57,18 @@ def test_p7m_trusted(pki, make_p7m):
 
 
 def test_p7m_untrusted_and_nothing_is_fetched(make_p7m):
+    """A sound signature whose chain leads to no listed authority (2026-11-27: the Portale delle Vendite
+    Pubbliche's seal, from the Ministry's internal CA): not valid, not "invalid" either, and never green."""
     trust = RootsTrust()
     report = verify.verify_bytes("x.p7m", make_p7m(PDF), trust)
-    assert not report.ok and report.verdict == "non valida"
-    assert report.checks[0].intact and not report.checks[0].trusted
+    (check,) = report.checks
+    assert not report.ok and report.verdict == check.verdict == "non verificabile"
+    assert check.intact and check.valid and not check.trusted and check.unknown_issuer
     assert trust.asked == ["offline"]  # an unanchored chain never triggers OCSP/CRL/AIA fetches
+    lines = messages.check_lines(check)
+    assert lines[0] == "FIRMA NON VERIFICABILE"
+    assert any("non è stato modificato" in line and "CA di prova" in line and "non si può confermare" in line
+               for line in lines)
 
 
 def test_trusted_chain_is_checked_offline_then_strictly(pki, make_p7m):
@@ -319,6 +326,7 @@ def test_expired_signer_valid_at_timestamp(pki, make_cades_t):
 def test_expired_signer_without_timestamp_stays_invalid(pki, make_p7m):
     report = verify.verify_bytes("x.p7m", make_p7m(PDF, who="scaduto"), RootsTrust(pki["ca"]))
     assert report.verdict == "non valida" and not report.checks[0].trusted and report.checks[0].valid_at is None
+    assert not report.checks[0].unknown_issuer  # a known authority, an expired certificate: invalid, not "unknown"
     assert any("scaduto il" in line for line in messages.check_lines(report.checks[0]))
 
 
@@ -591,3 +599,11 @@ def test_timestamp_token_with_revocation_data_is_readable(pki, make_token):
     token = cms.ContentInfo.load(with_ocsp_in_crls(make_token(b"ciao").dump()))
     report = verify.verify_bytes("nota.txt.tsd", tst.build_tsd(b"ciao", [token]), RootsTrust(pki["ca"]))
     assert report.kind is Kind.TSD and report.ok and report.content == b"ciao"
+
+
+def test_tsd_from_an_unlisted_authority_is_not_verifiable(pki, make_tsd):
+    report = verify.verify_bytes("nota.txt.tsd", make_tsd(b"ciao", stamper=dummy_timestamper(pki, _rogue_tsa(pki))),
+                                 RootsTrust(pki["ca"]))
+    (info,) = report.timestamps
+    assert report.verdict == "non verificabile" and info.unknown_issuer and not info.usable
+    assert "NON riconosciuta" in messages.timestamp_line(info)

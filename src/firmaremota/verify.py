@@ -60,6 +60,8 @@ from pyhanko_certvalidator.fetchers.requests_fetchers import (
     RequestsCertificateFetcher, RequestsCRLFetcher, RequestsFetcherBackend, RequestsOCSPFetcher,
 )
 
+from pyhanko.sign.ades.report import AdESIndeterminate
+
 from . import errors, files, p7m, trustlist, tst
 from .errors import FileError, FirmaError, OriginalRequired
 from .logsetup import register_paths
@@ -306,6 +308,12 @@ def validate_in_phases(validate: Callable[[ValidationContext], object], trust: T
                         detail=f"{type(exc).__name__}: {exc}") from None
 
 
+def _unknown_issuer(status) -> bool:
+    """Not trusted because no chain leads from the certificate to an authority on the trusted list (rather
+    than because something along a chain that does is expired, revoked or not allowed to sign)."""
+    return not status.trusted and status.trust_problem_indic is AdESIndeterminate.NO_CERTIFICATE_CHAIN_FOUND
+
+
 def _timestamp_info(status, trust: Trust, revocation_checked: bool) -> TimestampInfo | None:
     """A pyHanko TimestampSignatureStatus (or None) as our plain TimestampInfo."""
     if status is None:
@@ -319,6 +327,7 @@ def _timestamp_info(status, trust: Trust, revocation_checked: bool) -> Timestamp
         qualified=trust.qualified_tsa(status.validation_path, status.timestamp) if status.trusted else None,
         trust_checked=trust.trust_checked,
         revocation_checked=revocation_checked,
+        unknown_issuer=_unknown_issuer(status),
     )
 
 
@@ -358,6 +367,7 @@ def _check(status, revocation_checked: bool, trust: Trust, signer, *, covers_doc
         timestamp=timestamp,
         valid_at=valid_at,
         revoked_after_poe=revoked_after_poe,
+        unknown_issuer=_unknown_issuer(status),
     )
 
 

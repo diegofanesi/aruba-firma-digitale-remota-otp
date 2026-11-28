@@ -566,7 +566,8 @@ def build_parser() -> argparse.ArgumentParser:
                                "senza .tsr, nella stessa cartella)")
     verifica.add_argument("--alla-data", type=_date_arg, metavar="GG/MM/AAAA",
                           help="valuta la firma com'era a quella data (per esempio prima della scadenza del certificato)")
-    verifica.epilog = ("Codice di uscita: 0 firma valida, 5 firma non verificabile (per esempio senza rete), "
+    verifica.epilog = ("Codice di uscita: 0 firma valida, 5 firma non verificabile (per esempio senza rete, o "
+                       "certificato di un ente che non è nell'elenco dei certificatori qualificati), "
                        "1 firma non valida o errore.")
     verifica.set_defaults(handler=cmd_verifica)
 
